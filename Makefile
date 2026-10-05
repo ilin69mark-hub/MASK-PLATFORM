@@ -40,7 +40,16 @@ fmt: ## Format
 
 .PHONY: wasm
 wasm: ## Verify the kernel builds for the browser
-	cd $(ENGINE) && $(CARGO) build -p mask-kernel --target wasm32-unknown-unknown
+	cd $(ENGINE) && $(CARGO) build -p mask-wasm --target wasm32-unknown-unknown
+
+.PHONY: wasm-dist
+wasm-dist: ## Build the loadable browser bundle
+	cd $(ENGINE)/wasm && wasm-pack build --target web --release --out-dir pkg
+
+.PHONY: wasm-runtime
+wasm-runtime: ## Run the built kernel in a real JS runtime and compare with Rust
+	cd $(ENGINE)/wasm && wasm-pack build --target nodejs --release --out-dir pkg-node
+	cd $(ENGINE)/wasm && node scripts/runtime_check.mjs
 
 .PHONY: schema
 schema: ## Validate JSON Schemas and their examples
@@ -84,4 +93,4 @@ wasm-check: ## Re-run the ADR-0003 wasm verification
 	cd $(SPIKE) && ./wasm_check.sh
 
 .PHONY: check
-check: lint test schema schema-check wasm ## Everything CI should run
+check: lint test schema schema-check wasm wasm-runtime ## Everything CI should run

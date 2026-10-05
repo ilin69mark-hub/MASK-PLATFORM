@@ -1,0 +1,635 @@
+//! Browser-facing wrapper around the Mask Engine.
+//!
+//! Exists so that the geometry code in `mask-kernel`, `mask-rules`,
+//! `mask-validate` and `mask-nesting` can run in the browser without a second
+//! implementation. One implementation means a measurement cannot disagree
+//! between the server and the editor — which is the failure mode that matters,
+//! because it appears only at submission time.
+//!
+//! Contract with JavaScript (ADR-0013):
+//!
+//! * only strings and numbers cross the boundary, never geometry types;
+//! * errors arrive as rejected promises carrying a message, never as panics;
+//! * `MathMode` and the integer grid are fixed in this build, not chosen by the
+//!   caller, because a caller that picks them differently would produce
+//!   different hashes for the same geometry.
+//!
+//! The browser may *evaluate* a project. It may not *approve* one: the verdict it
+//! returns is advisory, and only the server writes an approval.
+
+use mask_kernel::geom::{Point, Shapes};
+use mask_kernel::{measure, ContentHash};
+use mask_profiles::{MaterialProfile, PlotterProfile};
+use mask_rules::{CuttingProfile, RuleSet};
+use mask_validate::{validate_with_nesting, LayerInput, Rect4, Verdict};
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+/// Grid baked into this build, mirrored from ADR-0004's `CANON_QUANTUM_MM`.
+///
+/// Mirrored on purpose rather than re-exported: this is the value JavaScript is
+/// told, and a test asserts it equals the kernel's. If the two ever drift, every
+/// hash produced in the browser differs from the server and the metrics cache
+/// silently stops working.
+const CANON_QUANTUM_MM: f64 = 1e-4;
+
+/// A contour as it arrives from JavaScript.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JsContour {
+    pub points: Vec<[f64; 2]>,
+    pub closed: bool,
+}
+
+/// A shape as it arrives from JavaScript: an outer contour plus holes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JsShape {
+    pub outer: JsContour,
+    #[serde(default)]
+    pub holes: Vec<JsContour>,
+}
+
+/// What JavaScript gets back about a layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerResult {
+    pub area_mm2: f64,
+    pub min_width_mm: Option<f64>,
+    pub min_gap_mm: Option<f64>,
+    pub island_count: usize,
+    pub hole_count: usize,
+    pub bbox: [f64; 4],
+    pub content_hash: String,
+    /// Paths as SVG path data, already canonicalised and quantised.
+    pub path_data: Vec<String>,
+}
+
+/// What JavaScript gets back about a whole project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    pub verdict: String,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+    /// Headline text per violation, ready to display.
+    pub messages: Vec<String>,
+    pub limits_physically_verified: bool,
+}
+
+/// An error that is safe to show a user.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsError {
+    pub message: String,
+}
+
+impl JsError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<JsError> for wasm_bindgen::JsValue {
+    fn from(e: JsError) -> Self {
+        js_sys::Error::new(&e.message).into()
+    }
+}
+
+/// Validate a project the way the server would.
+///
+/// Input is the same Mask Project JSON the server reads, so the editor cannot
+/// accidentally validate something the server would treat as a different
+/// document.
+#[wasm_bindgen]
+pub fn validate_project(
+    project_json: &str,
+    material_json: &str,
+    plotter_json: &str,
+) -> Result<JsValue, JsValue> {
+    let material: MaterialProfile = parse(material_json, "material profile").map_err(into_js)?;
+    let plotter: PlotterProfile = parse(plotter_json, "plotter profile").map_err(into_js)?;
+    let value: serde_json::Value = parse(project_json, "project").map_err(into_js)?;
+
+    let cutting = CuttingProfile::derive(&material, &plotter);
+    let rules = RuleSet::from_profile(&cutting);
+    let verified = cutting.is_physically_verified(&material, &plotter);
+
+    let layers = extract_layers(&value).map_err(into_js)?;
+    let tiles = extract_tiles(&value);
+
+    let report = validate_with_nesting(&layers, &cutting, &rules, verified, &tiles);
+
+    let result = ValidationResult {
+        verdict: verdict_name(report.verdict).to_string(),
+        error_count: report.counts.error,
+        warning_count: report.counts.warning,
+        info_count: report.counts.info,
+        messages: report
+            .violations
+            .iter()
+            .map(|v| v.headline.clone())
+            .collect(),
+        limits_physically_verified: report.limits_physically_verified,
+    };
+
+    to_js(&result)
+}
+
+/// Measure one layer and return its geometry ready for drawing.
+#[wasm_bindgen]
+pub fn measure_layer(shapes_json: &str) -> Result<JsValue, JsValue> {
+    to_js(&measure_layer_inner(shapes_json)?)
+}
+
+/// Typed measurement, callable from Rust tests without a JS value in the way.
+fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
+    let shapes: Shapes = parse(shapes_json, "shapes")?;
+    shapes
+        .validate(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| JsError::new(e.to_string()))?;
+
+    let (_, _, w, h) = mask_kernel::bounding_box(&shapes);
+
+    let min_width_mm = shapes
+        .shapes
+        .iter()
+        .filter_map(|s| mask_kernel::min_width(&Shapes::single(s.clone())))
+        .reduce(f64::min);
+
+    let path_data: Vec<String> = shapes
+        .shapes
+        .iter()
+        .flat_map(|s| s.contours())
+        .map(mask_kernel::to_path_data)
+        .collect();
+
+    Ok(LayerResult {
+        area_mm2: measure::shapes_area(&shapes),
+        min_width_mm,
+        min_gap_mm: None,
+        island_count: shapes.shapes.len(),
+        hole_count: shapes.shapes.iter().map(|s| s.holes.len()).sum(),
+        bbox: [0.0, 0.0, w, h],
+        content_hash: ContentHash::of(&shapes).to_string(),
+        path_data,
+    })
+}
+
+/// Widen a centreline to a target band width, then return the band.
+///
+/// This is what the editor calls for its "widen" tool, so the preview the user
+/// sees is the geometry that would actually be cut.
+#[wasm_bindgen]
+pub fn widen_centreline(points_json: &str, target_width_mm: f64) -> Result<JsValue, JsValue> {
+    to_js(&widen_centreline_inner(points_json, target_width_mm).map_err(into_js)?)
+}
+
+/// Typed widening, callable from Rust tests.
+fn widen_centreline_inner(points_json: &str, target_width_mm: f64) -> Result<LayerResult, JsError> {
+    let raw: Vec<[f64; 2]> = parse(points_json, "centreline")?;
+    if raw.len() < 2 {
+        return Err(JsError::new("a centreline needs at least two points"));
+    }
+    let mut points = Vec::with_capacity(raw.len());
+    for (i, p) in raw.iter().enumerate() {
+        points.push(
+            Point::new(p[0], p[1], mask_kernel::MAX_COORDINATE_MM)
+                .map_err(|e| JsError::new(format!("point {i}: {e}")))?,
+        );
+    }
+    let band =
+        mask_kernel::widen(&points, target_width_mm).map_err(|e| JsError::new(e.to_string()))?;
+    measure_layer_inner(&to_string(&band)?)
+}
+
+/// Canonical content hash of a shape set, for change detection in the editor.
+#[wasm_bindgen]
+pub fn content_hash(shapes_json: &str) -> Result<String, JsValue> {
+    let shapes: Shapes = parse(shapes_json, "shapes").map_err(into_js)?;
+    Ok(ContentHash::of(&shapes).to_string())
+}
+
+/// The effective limits a project would be validated against.
+///
+/// The editor shows these so a user can see why something failed instead of
+/// guessing at a number.
+#[wasm_bindgen]
+pub fn effective_limits(material_json: &str, plotter_json: &str) -> Result<JsValue, JsValue> {
+    let material: MaterialProfile = parse(material_json, "material profile").map_err(into_js)?;
+    let plotter: PlotterProfile = parse(plotter_json, "plotter profile").map_err(into_js)?;
+    let cutting = CuttingProfile::derive(&material, &plotter);
+    to_js(&cutting.limits)
+}
+
+/// Constants the editor needs in order to draw consistently with the engine.
+///
+/// Returned as a struct rather than hard-coded in TypeScript, so the two cannot
+/// drift apart.
+#[wasm_bindgen]
+pub fn engine_constants() -> JsValue {
+    let value = serde_json::json!({
+        "canon_quantum_mm": CANON_QUANTUM_MM,
+        "coord_dp": mask_kernel::CANON_COORD_DP,
+        "measure_report_dp": mask_kernel::MEASURE_REPORT_DP,
+        "min_width_eps_mm": mask_kernel::MIN_WIDTH_EPS_MM,
+        "max_coordinate_mm": mask_kernel::MAX_COORDINATE_MM,
+        "lib_scale": mask_kernel::LIB_SCALE,
+        "lib_math_mode": "Integer",
+        "engine_version": env!("CARGO_PKG_VERSION"),
+    });
+    to_js(&value).expect("constants are static and cannot fail")
+}
+
+/// Version of the browser kernel, for display and mismatch checks.
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+// ── helpers ───────────────────────────────────────────────────────────
+
+fn parse<T: serde::de::DeserializeOwned>(json: &str, what: &str) -> Result<T, JsError> {
+    serde_json::from_str(json).map_err(|e| JsError::new(format!("cannot parse {what}: {e}")))
+}
+
+/// Convert a typed error into something a JS caller can read.
+///
+/// Guarded because `js_sys::Error` needs a live JS runtime and would panic on
+/// the host. Keeping the guard means the typed core stays unit-testable without
+/// standing up a browser, while a real wasm build still gets a proper Error
+/// object with a message.
+fn into_js(e: JsError) -> JsValue {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Error::new(&e.message).into()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        JsValue::from_str(&e.message)
+    }
+}
+
+fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
+    // `serialize_maps_as_objects` is what makes a serde_json::Value object come
+    // across as a plain JS object. The default produces a `Map`, so
+    // `result.area_mm2` would be `undefined` while `result.get("area_mm2")`
+    // worked — a difference visible only in JavaScript, and exactly the kind of
+    // quiet split between two runtimes this design exists to prevent.
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    value
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(e.to_string()).into())
+}
+
+fn to_string<T: Serialize>(value: &T) -> Result<String, JsError> {
+    serde_json::to_string(value).map_err(|e| JsError::new(e.to_string()))
+}
+
+fn verdict_name(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Pass => "PASS",
+        Verdict::PassWithWarnings => "PASS_WITH_WARNINGS",
+        Verdict::Fail => "FAIL",
+        Verdict::Fatal => "FATAL",
+    }
+}
+
+/// Pull the layer list out of a Mask Project document.
+fn extract_layers(value: &serde_json::Value) -> Result<Vec<LayerInput>, JsError> {
+    let layers = value
+        .get("composition")
+        .and_then(|c| c.get("layers"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JsError::new("project has no composition.layers"))?;
+
+    let mut out = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let index = layer
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let name = layer
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("layer")
+            .to_string();
+
+        // Geometry may be inline or referenced. Only inline is supported here;
+        // a reference needs the geometry store, which lives on the server.
+        let geometry = match layer.get("geometry") {
+            Some(serde_json::Value::Object(map)) if map.contains_key("shapes") => {
+                serde_json::from_value::<Shapes>(serde_json::Value::Object(map.clone()))
+                    .map_err(|e| JsError::new(format!("layer {index} geometry: {e}")))?
+            }
+            _ => {
+                return Err(JsError::new(format!(
+                    "layer {index} has no inline geometry; the browser kernel evaluates inline geometry only"
+                )))
+            }
+        };
+
+        out.push(LayerInput {
+            index,
+            name,
+            geometry,
+        });
+    }
+    Ok(out)
+}
+
+/// Pull per-layer tile rectangles, when a nesting plan is present.
+fn extract_tiles(value: &serde_json::Value) -> std::collections::BTreeMap<u32, Vec<Rect4>> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(plans) = value
+        .get("nesting")
+        .and_then(|n| n.get("layers"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return map;
+    };
+
+    for plan in plans {
+        let Some(index) = plan.get("layer").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(tiles) = plan.get("tiles").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let rects: Vec<Rect4> = tiles
+            .iter()
+            .filter_map(|t| t.get("bbox").and_then(serde_json::Value::as_array))
+            .filter(|a| a.len() == 4)
+            .filter_map(|a| {
+                Some([
+                    a[0].as_f64()?,
+                    a[1].as_f64()?,
+                    a[2].as_f64()?,
+                    a[3].as_f64()?,
+                ])
+            })
+            .collect();
+        if !rects.is_empty() {
+            map.insert(index as u32, rects);
+        }
+    }
+    map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(w: f64, h: f64) -> String {
+        serde_json::json!({
+            "shapes": [{
+                "outer": {
+                    "points": [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn measuring_a_square_returns_its_width_and_area() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        assert!((result.area_mm2 - 50.0).abs() < 1e-9);
+        assert!((result.min_width_mm.expect("width") - 5.0).abs() < 1e-3);
+        assert_eq!(result.island_count, 1);
+    }
+
+    #[test]
+    fn measuring_produces_canonical_path_data() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        assert_eq!(result.path_data.len(), 1);
+        assert_eq!(
+            result.path_data[0],
+            "M 0.0000 0.0000 L 10.0000 0.0000 L 10.0000 5.0000 L 0.0000 5.0000 Z"
+        );
+    }
+
+    #[test]
+    fn a_null_coordinate_is_rejected_rather_than_propagated() {
+        let bad =
+            r#"{"shapes":[{"outer":{"points":[[null,0.0],[1.0,1.0]],"closed":true},"holes":[]}]}"#;
+        let err = measure_layer_inner(bad).expect_err("must not be accepted");
+        assert!(err.message.contains("cannot parse"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_never_reaches_the_geometry() {
+        // JSON has no NaN literal, so it arrives as null. The parser must reject
+        // it rather than coercing, because a zero would silently relocate a point.
+        let bad = r#"{"shapes":[{"outer":{"points":[[0.0,0.0],[1.0,1.0]],"closed":true},"holes":[]},
+                   {"outer":{"points":[["NaN",0.0],[2.0,2.0]],"closed":true},"holes":[]}]}"#;
+        assert!(measure_layer_inner(bad).is_err());
+    }
+
+    #[test]
+    fn an_out_of_bounds_coordinate_is_rejected() {
+        let bad = r#"{"shapes":[{"outer":{"points":[[0.0,0.0],[1.0e12,1.0]],"closed":true},"holes":[]}]}"#;
+        let err = measure_layer_inner(bad).expect_err("must not be accepted");
+        assert!(
+            err.message.contains("100000") || err.message.contains("bound"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_short_centreline_is_rejected_by_widen() {
+        let short = serde_json::json!([[0.0, 0.0]]).to_string();
+        assert!(widen_centreline_inner(&short, 0.8).is_err());
+    }
+
+    #[test]
+    fn widening_returns_the_band_geometry() {
+        let line = serde_json::json!([[0.0, 0.0], [100.0, 0.0]]).to_string();
+        let result = widen_centreline_inner(&line, 0.80).expect("widen");
+        assert!((result.min_width_mm.expect("width") - 0.80).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_hash_of_identical_geometry_matches_across_calls() {
+        let a = content_hash(&square(10.0, 5.0)).expect("hash");
+        let b = content_hash(&square(10.0, 5.0)).expect("hash");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn constants_match_the_kernel_grid() {
+        assert!((mask_kernel::CANON_QUANTUM_MM - CANON_QUANTUM_MM).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_project_without_a_composition_is_rejected() {
+        let bare = serde_json::json!({ "schema_version": 1 });
+        let err = extract_layers(&bare).expect_err("must not be accepted");
+        assert!(
+            err.message.contains("composition.layers"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn an_empty_layer_list_is_left_for_the_validator() {
+        // Not an extraction error: whether a project with no layers is valid is
+        // the validator's call, and duplicating that rule here would give two
+        // answers to one question.
+        let empty = serde_json::json!({ "composition": { "layers": [] } });
+        assert!(extract_layers(&empty)
+            .expect("extraction succeeds")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_layer_without_inline_geometry_is_rejected_not_skipped() {
+        // The browser kernel evaluates inline geometry only. Silently skipping a
+        // referenced layer would make the editor report a clean project while
+        // checking nothing.
+        let project = serde_json::json!({
+            "composition": { "layers": [
+                { "index": 1, "name": "Base", "geometry_id": "geo_01" }
+            ]}
+        });
+        let err = extract_layers(&project).expect_err("must not be accepted");
+        assert!(err.message.contains("inline geometry"), "{}", err.message);
+    }
+}
+#[cfg(test)]
+mod consistency_tests {
+    //! The point of ADR-0013: one geometry implementation, two runtimes.
+    //!
+    //! A measurement that differs between the browser and the server is the worst
+    //! class of bug in this system, because it appears only at submission time —
+    //! the editor shows a clean project and the server then rejects it.
+
+    use super::*;
+
+    fn square(w: f64, h: f64) -> String {
+        serde_json::json!({
+            "shapes": [{
+                "outer": { "points": [[0.0,0.0],[w,0.0],[w,h],[0.0,h]], "closed": true },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_baked_grid_matches_the_kernel_grid_exactly() {
+        // If these drift, every hash produced in the browser differs from the
+        // server and the metrics cache silently stops working.
+        assert_eq!(CANON_QUANTUM_MM, mask_kernel::CANON_QUANTUM_MM);
+    }
+
+    #[test]
+    fn the_math_mode_is_the_pinned_integer_one() {
+        // Read through Debug so the assertion does not need a direct dependency
+        // on the geometry library; the kernel already exposes the pinned choice.
+        assert_eq!(format!("{:?}", mask_kernel::lib_math_mode()), "Integer");
+    }
+
+    #[test]
+    fn path_data_from_the_browser_matches_path_data_from_the_server() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        let server = mask_kernel::to_path_data(&mask_kernel::Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 10.0, y: 0.0 },
+                Point { x: 10.0, y: 5.0 },
+                Point { x: 0.0, y: 5.0 },
+            ],
+            closed: true,
+        });
+        assert_eq!(result.path_data[0], server);
+    }
+
+    #[test]
+    fn a_hash_computed_for_the_editor_matches_the_kernels_own() {
+        let shapes: Shapes = serde_json::from_str(&square(7.0, 3.0)).expect("parse");
+        let from_editor =
+            content_hash(&serde_json::to_string(&shapes).expect("json")).expect("hash");
+        let from_kernel = mask_kernel::ContentHash::of(&shapes);
+        assert_eq!(from_editor, from_kernel.to_string());
+    }
+}
+
+#[cfg(test)]
+mod golden_export {
+    //! Writes the expected browser-visible values, so the Node runtime check can
+    //! compare against the Rust side instead of against itself.
+    //!
+    //! Generated by `cargo test -p mask-wasm golden -- --ignored --nocapture`.
+    //! Committed, because a golden file nobody regenerates is just a constant.
+
+    use super::*;
+
+    fn square(w: f64, h: f64) -> String {
+        serde_json::json!({
+            "shapes": [{
+                "outer": { "points": [[0.0,0.0],[w,0.0],[w,h],[0.0,h]], "closed": true },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    fn band(width: f64) -> Shapes {
+        mask_kernel::widen(
+            &[Point { x: 0.0, y: 0.0 }, Point { x: 100.0, y: 0.0 }],
+            width,
+        )
+        .expect("band")
+    }
+
+    #[test]
+    #[ignore = "regenerates scripts/golden/hashes.json"]
+    fn write_golden() {
+        let mut doc = serde_json::Map::new();
+
+        doc.insert(
+            "square_10x5".into(),
+            serde_json::json!(mask_kernel::ContentHash::of(
+                &serde_json::from_str::<Shapes>(&square(10.0, 5.0)).expect("parse")
+            )
+            .to_string()),
+        );
+        doc.insert(
+            "square_7x3".into(),
+            serde_json::json!(mask_kernel::ContentHash::of(
+                &serde_json::from_str::<Shapes>(&square(7.0, 3.0)).expect("parse")
+            )
+            .to_string()),
+        );
+        doc.insert(
+            "band_0_80".into(),
+            serde_json::json!(mask_kernel::ContentHash::of(&band(0.80)).to_string()),
+        );
+        doc.insert(
+            "band_0_42".into(),
+            serde_json::json!(mask_kernel::ContentHash::of(&band(0.42)).to_string()),
+        );
+
+        // The band geometry travels with the hashes. Guessing it in JavaScript
+        // would test a shape nobody produces: `widen` decides its own vertex
+        // order and miter placement, and those are exactly the details a hash
+        // depends on.
+        doc.insert(
+            "band_0_80_shapes".into(),
+            serde_json::to_value(band(0.80)).expect("value"),
+        );
+        doc.insert(
+            "band_0_42_shapes".into(),
+            serde_json::to_value(band(0.42)).expect("value"),
+        );
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/golden/hashes.json");
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(doc)).expect("json");
+        std::fs::write(&path, format!("{json}\n")).expect("write golden");
+        println!("wrote {}", path.display());
+    }
+}

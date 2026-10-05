@@ -65,3 +65,7 @@ engine/out/
 
 # ── Generated masks (produced by `make demo`) ─────────────────────
 engine/out/
+
+# ── WASM build output (regenerate with `make wasm-dist`) ───────────
+engine/wasm/pkg/
+engine/wasm/pkg-node/
