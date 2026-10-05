@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mask_export::{tile_to_svg, ArtifactContext, MarksToDraw};
+use mask_export::{manifest, tile_to_svg, ArtifactContext, MarksToDraw};
 use mask_kernel::{union, widen, Point, Shapes};
 use mask_nesting::{fixed_grid, needs_nesting, NestRequest};
 use mask_profiles::{MaterialProfile, PlotterProfile};
@@ -20,6 +20,16 @@ use mask_validate::{render, validate_with_nesting, LayerInput, Rect4};
 
 /// Version stamped into every artifact, so reproduction can be verified later.
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// One artifact as it will appear in the manifest.
+struct WrittenArtifact {
+    kind: &'static str,
+    file: String,
+    sha256: String,
+    bytes: usize,
+    layer: u32,
+    tile: Option<String>,
+}
 
 struct Args {
     fixture: PathBuf,
@@ -95,7 +105,24 @@ USAGE
 struct Fixture {
     project_id: String,
     revision: u32,
+    /// Target part, carried into the manifest. Explicit rather than inferred:
+    /// a manifest that guesses what it was made for is worse than one that says
+    /// the target is unknown.
+    #[serde(default)]
+    target: FixtureTarget,
     layers: Vec<FixtureLayer>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct FixtureTarget {
+    #[serde(default)]
+    object: String,
+    #[serde(default)]
+    part: String,
+    #[serde(default)]
+    part_code: String,
+    #[serde(default)]
+    dimensions_mm: [f64; 2],
 }
 
 #[derive(serde::Deserialize)]
@@ -340,9 +367,13 @@ fn run(args: &Args) -> Result<bool, String> {
     fs::create_dir_all(&args.out_dir)
         .map_err(|e| format!("cannot create {}: {e}", args.out_dir.display()))?;
 
+    let curve_tolerance = plotter.blade.curve_tolerance_mm;
+    let plt_device = mask_export::plt::PltDevice::from_profile(&plotter, 40.0, 30);
+
     let mut written = 0usize;
     let mut skipped = 0usize;
     let mut total_bytes = 0usize;
+    let mut artifacts: Vec<WrittenArtifact> = Vec::new();
     for unit in &units {
         // A ragged mask can leave an empty grid cell. It is skipped rather than
         // failing the run: the remaining tiles are still cuttable, and tile
@@ -370,27 +401,100 @@ fn run(args: &Args) -> Result<bool, String> {
                 mask_export::to_svg(&unit.geometry, unit.layer_index, &unit.label, &report, &ctx)
             }
         };
-        let file = match &unit.tile {
-            Some(tile) => mask_export::tile_artifact_name(
+        let base = match &unit.tile {
+            Some(tile) => mask_export::tile_stem(
                 &fixture.project_id,
                 fixture.revision,
                 unit.layer_index,
                 &tile.marks.label,
-                "svg",
             ),
-            None => mask_export::artifact_name(
-                &fixture.project_id,
-                fixture.revision,
-                unit.layer_index,
-                "svg",
-            ),
+            None => {
+                mask_export::layer_stem(&fixture.project_id, fixture.revision, unit.layer_index)
+            }
         };
-        let path = args.out_dir.join(&file);
-        fs::write(&path, &svg).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        written += 1;
-        total_bytes += svg.len();
-        println!("  wrote {} ({} bytes)", path.display(), svg.len());
+
+        let dxf = mask_export::dxf::to_dxf(
+            &mask_export::dxf::DxfContent {
+                cut: unit.geometry.clone(),
+                registration: unit
+                    .tile
+                    .as_ref()
+                    .map_or_else(Shapes::new, |t| manifest::registration_geometry(&t.marks)),
+            },
+            curve_tolerance,
+        );
+
+        let plt = mask_export::plt::to_plt(
+            &mask_export::plt::PltContent {
+                cut: unit.geometry.clone(),
+                registration: Shapes::new(),
+            },
+            plt_device,
+            &unit.label,
+        );
+
+        for (kind, ext, body) in [
+            ("cut_svg", "svg", &svg),
+            ("cut_dxf", "dxf", &dxf),
+            ("cut_plt", "plt", &plt),
+        ] {
+            let file = format!("{base}.{ext}");
+            let path = args.out_dir.join(&file);
+            fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            written += 1;
+            total_bytes += body.len();
+            artifacts.push(WrittenArtifact {
+                kind,
+                file,
+                sha256: mask_export::sha256_hex(body.as_bytes()),
+                bytes: body.len(),
+                layer: unit.layer_index,
+                tile: unit.tile.as_ref().map(|t| t.marks.label.clone()),
+            });
+            println!("  wrote {} ({} bytes)", path.display(), body.len());
+        }
     }
+    let manifest_doc = manifest::build_manifest(
+        &manifest::ProjectRef {
+            id: fixture.project_id.clone(),
+            revision: fixture.revision,
+            object: fixture.target.object.clone(),
+            part: fixture.target.part.clone(),
+            part_code: fixture.target.part_code.clone(),
+            dimensions_mm: fixture.target.dimensions_mm,
+        },
+        &material,
+        &plotter,
+        &profile,
+        &report,
+        &layers,
+        &artifacts
+            .iter()
+            .map(|a| manifest::ArtifactRow {
+                kind: a.kind,
+                file: a.file.clone(),
+                sha256: a.sha256.clone(),
+                bytes: a.bytes,
+                layer: Some(a.layer),
+                tile: a.tile.clone(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    let manifest_json = serde_json::to_string_pretty(&manifest_doc)
+        .map_err(|e| format!("cannot serialise manifest: {e}"))?;
+    let manifest_file = format!(
+        "{}_rev{}_manifest.json",
+        fixture.project_id, fixture.revision
+    );
+    let manifest_path = args.out_dir.join(&manifest_file);
+    fs::write(&manifest_path, &manifest_json)
+        .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
+    println!(
+        "  wrote {} ({} bytes)",
+        manifest_path.display(),
+        manifest_json.len()
+    );
+
     println!(
         "  {} file(s), {} bytes total{}",
         written,

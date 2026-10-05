@@ -8,6 +8,10 @@
 //! version must produce byte-identical output. No clock, no locale, no hash-map
 //! iteration order, fixed decimal precision.
 
+pub mod dxf;
+pub mod manifest;
+pub mod plt;
+
 use mask_kernel::{Shape, Shapes, CANON_COORD_DP};
 use mask_nesting::RegistrationMarks;
 use mask_validate::{ValidationReport, Verdict};
@@ -290,7 +294,10 @@ fn num(value: f64) -> String {
 /// self-describing (EXPORT_ENGINE.md §9).
 #[must_use]
 pub fn artifact_name(project_id: &str, revision: u32, layer_index: u32, extension: &str) -> String {
-    format!("{project_id}_rev{revision}_L{layer_index:02}.{extension}")
+    format!(
+        "{}.{extension}",
+        layer_stem(project_id, revision, layer_index)
+    )
 }
 
 /// Every numeric literal in a document, so precision can be asserted.
@@ -334,7 +341,35 @@ pub fn tile_artifact_name(
     tile_id: &str,
     extension: &str,
 ) -> String {
-    format!("{project_id}_rev{revision}_L{layer_index:02}_{tile_id}.{extension}")
+    format!(
+        "{}.{extension}",
+        tile_stem(project_id, revision, layer_index, tile_id)
+    )
+}
+
+/// File-name stem for a whole layer.
+#[must_use]
+pub fn layer_stem(project_id: &str, revision: u32, layer_index: u32) -> String {
+    format!("{project_id}_rev{revision}_L{layer_index:02}")
+}
+
+/// File-name stem for one tile of a layer.
+#[must_use]
+pub fn tile_stem(project_id: &str, revision: u32, layer_index: u32, tile_id: &str) -> String {
+    format!("{project_id}_rev{revision}_L{layer_index:02}_{tile_id}")
+}
+
+/// Hex SHA-256 of some bytes.
+///
+/// Used for artifact rows in the manifest. The kernel owns geometry hashing;
+/// this exists so the manifest can record file digests from the same crate that
+/// writes the files.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Decimal places used for coordinates, exposed for tests.

@@ -136,7 +136,11 @@ version = "0.1.0"
 dependencies = [
  "mask-kernel",
  "mask-nesting",
+ "mask-profiles",
+ "mask-rules",
  "mask-validate",
+ "serde_json",
+ "sha2",
  "thiserror",
 ]
 

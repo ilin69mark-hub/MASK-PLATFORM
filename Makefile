@@ -46,6 +46,10 @@ wasm: ## Verify the kernel builds for the browser
 schema: ## Validate JSON Schemas and their examples
 	python3 $(DOCS)/schema/validate_examples.py
 
+.PHONY: schema-check
+schema-check: demo schema ## Validate the manifest the engine actually produces
+	python3 $(DOCS)/schema/validate_generated.py
+
 .PHONY: demo
 demo: ## Generate masks for a fixture (override with FIXTURE=…)
 	@mkdir -p $(OUT)
@@ -80,4 +84,4 @@ wasm-check: ## Re-run the ADR-0003 wasm verification
 	cd $(SPIKE) && ./wasm_check.sh
 
 .PHONY: check
-check: lint test schema wasm ## Everything CI should run
+check: lint test schema schema-check wasm ## Everything CI should run

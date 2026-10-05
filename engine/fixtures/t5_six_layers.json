@@ -1,6 +1,15 @@
 {
-  "project_id": "MASK-T005",
+  "project_id": "MASK-000305",
   "revision": 1,
+  "target": {
+    "object": "Test panel",
+    "part": "Flat practice panel",
+    "part_code": "PANEL",
+    "dimensions_mm": [
+      260.0,
+      180.0
+    ]
+  },
   "_comment": "TEST 5. Six layers on one panel in the intended application order. Expected: PASS. This is the target complexity for the MVP. The open question is not whether it validates but whether registration error accumulated across six weed-position-peel cycles still lands on a recognisable design. With a 0.35 mm registration tolerance and six cycles, that is the number to watch and the reason this test exists.",
   "layers": [
     {

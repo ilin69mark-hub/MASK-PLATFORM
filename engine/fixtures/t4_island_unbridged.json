@@ -1,6 +1,15 @@
 {
-  "project_id": "MASK-T004",
+  "project_id": "MASK-000304",
   "revision": 1,
+  "target": {
+    "object": "Test panel",
+    "part": "Flat practice panel",
+    "part_code": "PANEL",
+    "dimensions_mm": [
+      260.0,
+      180.0
+    ]
+  },
   "_comment": "TEST 4. The same ring and the same patch, with the bridge removed. Expected: FAIL on island_anchored. Cut it anyway. If the patch stays on the part, the island rule is over-strict and the island minimum can go below 0.80 mm. If it lifts or drops, the rule is right and the failure is the useful result.",
   "layers": [
     {

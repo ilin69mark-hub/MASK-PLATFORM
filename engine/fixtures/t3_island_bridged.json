@@ -1,6 +1,15 @@
 {
-  "project_id": "MASK-T003",
+  "project_id": "MASK-000303",
   "revision": 1,
+  "target": {
+    "object": "Test panel",
+    "part": "Flat practice panel",
+    "part_code": "PANEL",
+    "dimensions_mm": [
+      260.0,
+      180.0
+    ]
+  },
   "_comment": "TEST 3. A 6 mm patch floating inside a 120 mm ring, joined by a 1.5 mm band that runs from the top of the ring to the patch. The union closes the hole, so no island is reported. Expected: PASS. Physically the patch must stay attached through weed, position and peel. Bridge width 1.5 mm exceeds the 1.20 mm profile minimum.",
   "layers": [
     {

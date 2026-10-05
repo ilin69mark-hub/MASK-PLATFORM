@@ -1,6 +1,15 @@
 {
-  "project_id": "MASK-T001",
+  "project_id": "MASK-000301",
   "revision": 1,
+  "target": {
+    "object": "Test panel",
+    "part": "Flat practice panel",
+    "part_code": "PANEL",
+    "dimensions_mm": [
+      260.0,
+      180.0
+    ]
+  },
   "_comment": "TEST 1. Element exactly at the 0.80 mm minimum. Expected: PASS, and the cut element must survive being weeded, positioned and peeled. If this fails, the profile minimum is too optimistic and must be raised.",
   "layers": [
     {

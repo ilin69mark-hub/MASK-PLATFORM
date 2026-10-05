@@ -1,6 +1,15 @@
 {
-  "project_id": "MASK-T002",
+  "project_id": "MASK-000302",
   "revision": 1,
+  "target": {
+    "object": "Test panel",
+    "part": "Flat practice panel",
+    "part_code": "PANEL",
+    "dimensions_mm": [
+      260.0,
+      180.0
+    ]
+  },
   "_comment": "TEST 2. Widths just below the 0.80 mm minimum: 0.60, 0.70, 0.75. Expected: FAIL from the validator. Then cut it anyway by hand, because the point is to observe WHAT HAPPENS. The profile claims these cannot be held; the physical run is what decides whether that claim is true.",
   "layers": [
     {
