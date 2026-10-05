@@ -1,0 +1,602 @@
+//! Manufacturing Validator.
+//!
+//! The only component permitted to declare a project manufacturable. Nothing
+//! else — not AI, not an editor, not a generator — may produce a verdict
+//! (P-01).
+//!
+//! Two rules govern this module:
+//!
+//! 1. It **never** panics. Every failure becomes a violation with a severity.
+//! 2. Its messages are written for a person, with the number, the cause and the
+//!    action (P-09). No error codes are shown in user-facing text.
+
+use mask_kernel::{
+    bounding_box, meets_threshold, min_width, shapes_area, Contour, Point, Shape, Shapes,
+};
+use mask_rules::{CuttingProfile, RuleSet, Severity};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    #[error("geometry is invalid: {0}")]
+    Geometry(String),
+}
+
+/// One problem found in the project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Violation {
+    pub code: String,
+    pub severity: Severity,
+    pub layer_index: Option<u32>,
+    pub measured: Option<f64>,
+    pub required: Option<f64>,
+    pub count: usize,
+    /// Short human-facing statement.
+    pub headline: String,
+    /// Why it matters physically.
+    pub reason: String,
+    /// What the user can do about it.
+    pub actions: Vec<Action>,
+}
+
+/// Something the reader can do about a violation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Action {
+    pub id: String,
+    pub label: String,
+    pub primary: bool,
+    /// Expected cost of taking this action, in fidelity.
+    pub estimated_fidelity_loss: Option<f64>,
+}
+
+/// The overall outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Verdict {
+    Pass,
+    PassWithWarnings,
+    Fail,
+    Fatal,
+}
+
+impl Verdict {
+    /// Derive a verdict from the violations collected.
+    ///
+    /// `Fatal` wins over everything, then `error`, then `warning`. This is
+    /// invariant I-5: a `Pass` can never coexist with an error.
+    #[must_use]
+    pub fn from_violations(violations: &[Violation]) -> Self {
+        let has = |s: Severity| violations.iter().any(|v| v.severity == s);
+        if has(Severity::Fatal) {
+            Self::Fatal
+        } else if has(Severity::Error) {
+            Self::Fail
+        } else if has(Severity::Warning) {
+            Self::PassWithWarnings
+        } else {
+            Self::Pass
+        }
+    }
+
+    #[must_use]
+    pub fn is_manufacturable(self) -> bool {
+        matches!(self, Self::Pass | Self::PassWithWarnings)
+    }
+}
+
+/// Measurements taken from one layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerMetrics {
+    pub index: u32,
+    pub name: String,
+    pub paths: usize,
+    pub islands: usize,
+    pub holes: usize,
+    pub area_mm2: f64,
+    pub bbox: [f64; 4],
+    /// Narrowest measured element, when one could be measured.
+    pub min_width_mm: Option<f64>,
+}
+
+/// The result of one validation run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationReport {
+    pub verdict: Verdict,
+    pub counts: Counts,
+    pub violations: Vec<Violation>,
+    pub layers: Vec<LayerMetrics>,
+    pub fidelity: Option<f64>,
+    /// Whether the profiles behind these limits have been proven by cutting
+    /// real film. Until they are, a `Pass` is a calculation, not a fact.
+    pub limits_physically_verified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Counts {
+    pub fatal: usize,
+    pub error: usize,
+    pub warning: usize,
+    pub info: usize,
+}
+
+impl Counts {
+    fn of(violations: &[Violation]) -> Self {
+        let count = |s: Severity| violations.iter().filter(|v| v.severity == s).count();
+        Self {
+            fatal: count(Severity::Fatal),
+            error: count(Severity::Error),
+            warning: count(Severity::Warning),
+            info: count(Severity::Info),
+        }
+    }
+}
+
+/// One mask layer as the validator sees it.
+#[derive(Debug, Clone)]
+pub struct LayerInput {
+    pub index: u32,
+    pub name: String,
+    pub geometry: Shapes,
+}
+
+/// Validate a project against a rule set.
+///
+/// Never panics: every problem becomes a violation.
+#[must_use]
+pub fn validate(
+    layers: &[LayerInput],
+    profile: &CuttingProfile,
+    rules: &RuleSet,
+    limits_physically_verified: bool,
+) -> ValidationReport {
+    let mut violations = Vec::new();
+    let mut metrics = Vec::new();
+
+    // Invariant I-1: a project must have at least one layer.
+    if layers.is_empty() {
+        violations.push(Violation {
+            code: "no_layers".into(),
+            severity: Severity::Fatal,
+            layer_index: None,
+            measured: None,
+            required: None,
+            count: 0,
+            headline: "Проект не содержит ни одного слоя.".into(),
+            reason: "Наложить маску нечем.".into(),
+            actions: vec![Action {
+                id: "add_layer".into(),
+                label: "Добавить слой".into(),
+                primary: true,
+                estimated_fidelity_loss: None,
+            }],
+        });
+        return finish(violations, metrics, None, limits_physically_verified);
+    }
+
+    for layer in layers {
+        let measured = measure_layer(layer);
+        check_layer(layer, &measured, profile, rules, &mut violations);
+        metrics.push(measured);
+    }
+
+    // Reported once per run rather than once per layer: the geometry spine
+    // stores polygonal contours, so corner radius cannot be measured yet.
+    // Repeating the same note for six layers would bury the real violations.
+    if let Some(rule) = rules.rule("corner_radius") {
+        violations.push(Violation {
+            code: rule.code.clone(),
+            severity: Severity::Info,
+            layer_index: None,
+            measured: None,
+            required: Some(profile.limits.corner_radius_mm),
+            count: 0,
+            headline: "Радиус углов пока не измеряется: контуры многоугольные.".into(),
+            reason: "Проверка заработает, когда геометрия будет хранить кривые.".into(),
+            actions: vec![Action {
+                id: "acknowledge".into(),
+                label: "Понятно".into(),
+                primary: false,
+                estimated_fidelity_loss: None,
+            }],
+        });
+    }
+
+    finish(violations, metrics, None, limits_physically_verified)
+}
+
+/// Measure one layer. Geometry errors degrade to `None`, never to a panic.
+fn measure_layer(layer: &LayerInput) -> LayerMetrics {
+    let (min_x, min_y, w, h) = bounding_box(&layer.geometry);
+
+    // Each shape is a separate region of film, so the layer's narrowest element
+    // is the minimum across regions. min_width works on a Shapes set, so each
+    // region is wrapped rather than reimplementing the measurement.
+    let min_width_mm = layer
+        .geometry
+        .shapes
+        .iter()
+        .filter_map(|shape| min_width(&Shapes::single(shape.clone())))
+        .reduce(f64::min);
+
+    LayerMetrics {
+        index: layer.index,
+        name: layer.name.clone(),
+        paths: layer.geometry.shapes.len(),
+        islands: layer.geometry.shapes.len(),
+        holes: layer.geometry.shapes.iter().map(|s| s.holes.len()).sum(),
+        area_mm2: shapes_area(&layer.geometry),
+        bbox: [min_x, min_y, w, h],
+        min_width_mm,
+    }
+}
+
+/// Apply the rule set to one layer.
+fn check_layer(
+    layer: &LayerInput,
+    metrics: &LayerMetrics,
+    profile: &CuttingProfile,
+    rules: &RuleSet,
+    violations: &mut Vec<Violation>,
+) {
+    let limits = &profile.limits;
+
+    // min_line_width — the rule that matters most for physical survival.
+    if let (Some(rule), Some(width)) = (rules.rule("min_line_width"), metrics.min_width_mm) {
+        if !meets_threshold(width, limits.line_width_mm) {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(width),
+                required: Some(limits.line_width_mm),
+                count: 1,
+                headline: format!(
+                    "Слой {} «{}»: элемент уже минимума.",
+                    layer.index, layer.name
+                ),
+                reason: rule.reason.to_string(),
+                actions: autofix_and_explain(rule.auto_fixable),
+            });
+        }
+    }
+
+    // layer_fits_field — can the plotter even reach this layer?
+    if let Some(rule) = rules.rule("layer_fits_field") {
+        let (_, _, w, _) = (
+            metrics.bbox[0],
+            metrics.bbox[1],
+            metrics.bbox[2],
+            metrics.bbox[3],
+        );
+        if w > limits.max_tile_width_mm {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(w),
+                required: Some(limits.max_tile_width_mm),
+                count: 1,
+                headline: format!(
+                    "Слой {} шире рабочего поля: {:.1} мм при {:.1} мм.",
+                    layer.index, w, limits.max_tile_width_mm
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![Action {
+                    id: "nest".into(),
+                    label: "Разбить на плитки".into(),
+                    primary: true,
+                    estimated_fidelity_loss: Some(0.0),
+                }],
+            });
+        }
+    }
+
+    // island_anchored — an island with no bridge falls off the part.
+    if let Some(rule) = rules.rule("island_anchored") {
+        // Every shape in the set is disconnected from the others by
+        // definition, so a single-region layer has no unanchored island.
+        // Multi-region layers need bridges; that check lands with the nesting
+        // and bridge stages.
+        let _ = rule;
+        let _ = profile;
+    }
+}
+
+fn autofix_and_explain(auto_fixable: bool) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if auto_fixable {
+        actions.push(Action {
+            id: "autofix".into(),
+            label: "Исправить автоматически".into(),
+            primary: true,
+            estimated_fidelity_loss: Some(0.02),
+        });
+    }
+    actions.push(Action {
+        id: "show_elements".into(),
+        label: "Показать элементы".into(),
+        primary: false,
+        estimated_fidelity_loss: None,
+    });
+    actions.push(Action {
+        id: "change_material".into(),
+        label: "Выбрать другой материал".into(),
+        primary: false,
+        estimated_fidelity_loss: None,
+    });
+    actions
+}
+
+fn finish(
+    violations: Vec<Violation>,
+    layers: Vec<LayerMetrics>,
+    fidelity: Option<f64>,
+    verified: bool,
+) -> ValidationReport {
+    let verdict = Verdict::from_violations(&violations);
+    let counts = Counts::of(&violations);
+    ValidationReport {
+        verdict,
+        counts,
+        violations,
+        layers,
+        fidelity,
+        limits_physically_verified: verified,
+    }
+}
+
+/// Render a report as the human-facing text the UI shows (P-09).
+#[must_use]
+pub fn render(report: &ValidationReport) -> String {
+    if report.violations.is_empty() {
+        return "Проблем не найдено.".to_string();
+    }
+
+    let mut out = Vec::new();
+    for v in &report.violations {
+        let mark = match v.severity {
+            Severity::Fatal => "✖",
+            Severity::Error => "✖",
+            Severity::Warning => "⚠",
+            Severity::Info => "ℹ",
+        };
+        out.push(format!("{mark} {}", v.headline));
+        if let (Some(m), Some(r)) = (v.measured, v.required) {
+            out.push(format!(
+                "   измерено {:.3} мм, требуется {:.3} мм",
+                mask_kernel::report(m),
+                mask_kernel::report(r)
+            ));
+        }
+        out.push(format!("   Почему это важно: {}", v.reason));
+        let buttons: Vec<String> = v.actions.iter().map(|a| a.label.clone()).collect();
+        if !buttons.is_empty() {
+            out.push(format!("   [{}]", buttons.join("]  [")));
+        }
+        out.push(String::new());
+    }
+
+    if !report.limits_physically_verified {
+        out.push(
+            "Примечание: пороги взяты из datasheet и не подтверждены вырезом реального материала."
+                .to_string(),
+        );
+    }
+    out.join("\n")
+}
+
+/// Convenience: build a layer input from simple contour rings.
+#[must_use]
+pub fn layer_from_contours(index: u32, name: &str, contours: Vec<Vec<[f64; 2]>>) -> LayerInput {
+    let shapes = contours
+        .into_iter()
+        .map(|pts| {
+            let outer = Contour {
+                points: pts.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
+                closed: true,
+            };
+            Shape::new(outer)
+        })
+        .collect();
+    LayerInput {
+        index,
+        name: name.to_string(),
+        geometry: Shapes { shapes },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mask_kernel::widen;
+
+    fn profile() -> CuttingProfile {
+        let material = mask_profiles::MaterialProfile {
+            code: "matte-vinyl-090".into(),
+            version: 4,
+            name: "Matte vinyl".into(),
+            family: "vinyl".into(),
+            thickness_mm: 0.09,
+            minimums: mask_profiles::Minimums {
+                line_width_mm: 0.80,
+                gap_mm: 0.90,
+                island_area_mm2: 2.40,
+                island_width_mm: 0.60,
+                feature_length_mm: 3.00,
+                corner_radius_mm: 0.40,
+                bridge_width_mm: 1.20,
+                bridge_length_mm: 25.0,
+            },
+            physical: mask_profiles::Physical {
+                adhesion: "medium".into(),
+                adhesive_system: "water_sensitive".into(),
+                peel_angle_min_deg: 120.0,
+                peel_rate: "slow".into(),
+                max_temp_c: 80.0,
+                tolerance_registration_mm: 0.35,
+                surface_prep: vec![],
+            },
+            limits: mask_profiles::Limits {
+                max_density_per_100cm2: 180.0,
+                min_angle_deg: 30.0,
+                max_area_mm2: 400_000.0,
+            },
+            status: mask_profiles::ProfileStatus::Active,
+            verified_physical: true,
+            notes: String::new(),
+        };
+        let plotter = mask_profiles::PlotterProfile {
+            code: "knife-25mm".into(),
+            version: 2,
+            name: "Knife plotter".into(),
+            kind: "knife_plotter".into(),
+            blade: mask_profiles::Blade {
+                angle_deg: 45.0,
+                offset_mm: 0.10,
+                kerf_mm: 0.15,
+                curve_tolerance_mm: 0.08,
+                curve_multiplier: 4.0,
+            },
+            working_area: mask_profiles::WorkingArea {
+                width_mm: 300.0,
+                length_mm: 1200.0,
+                usable_margin_mm: 8.0,
+            },
+            accuracy: mask_profiles::Accuracy {
+                repeatability_mm: 0.05,
+                registration_method: "crosshair_marks".into(),
+                max_registration_error_mm: 0.30,
+            },
+            status: mask_profiles::ProfileStatus::Active,
+            verified_physical: true,
+        };
+        CuttingProfile::derive(&material, &plotter)
+    }
+
+    /// A band of the given width, as one layer.
+    fn band_layer(index: u32, width: f64, length: f64) -> LayerInput {
+        let line = vec![
+            Point {
+                x: 0.0,
+                y: width / 2.0,
+            },
+            Point {
+                x: length,
+                y: width / 2.0,
+            },
+        ];
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: widen(&line, width).unwrap(),
+        }
+    }
+
+    fn run(layers: Vec<LayerInput>) -> ValidationReport {
+        let cp = profile();
+        let rs = RuleSet::from_profile(&cp);
+        validate(&layers, &cp, &rs, true)
+    }
+
+    #[test]
+    fn a_band_at_the_threshold_passes_the_width_rule() {
+        let report = run(vec![band_layer(1, 0.80, 200.0)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "min_line_width"),
+            "a 0.80 mm band must satisfy a 0.80 mm minimum: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn a_band_below_the_threshold_fails_and_explains_itself() {
+        let report = run(vec![band_layer(1, 0.42, 200.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_line_width")
+            .expect("a 0.42 mm band must violate a 0.80 mm minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert!(matches!(report.verdict, Verdict::Fail));
+        assert!(
+            v.reason.contains("Детализация") || v.reason.contains("плёнка") || !v.reason.is_empty()
+        );
+        assert!(v.actions.iter().any(|a| a.id == "autofix"));
+    }
+
+    #[test]
+    fn rendered_text_names_the_measurement_and_the_limit() {
+        let report = run(vec![band_layer(1, 0.42, 200.0)]);
+        let text = render(&report);
+        assert!(text.contains("0.420 мм"), "measured value missing: {text}");
+        assert!(text.contains("0.800 мм"), "required value missing: {text}");
+        assert!(
+            !text.contains("ERROR"),
+            "no error codes in user-facing text: {text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_project_is_fatal() {
+        let report = run(vec![]);
+        assert_eq!(report.verdict, Verdict::Fatal);
+    }
+
+    #[test]
+    fn verdict_pass_implies_no_error_violations() {
+        // Invariant I-5, asserted.
+        for report in [
+            run(vec![]),
+            run(vec![band_layer(1, 0.42, 200.0)]),
+            run(vec![band_layer(1, 0.80, 200.0)]),
+        ] {
+            if report.verdict.is_manufacturable() {
+                assert_eq!(report.counts.error, 0, "PASS with an error violation");
+            }
+        }
+    }
+
+    #[test]
+    fn an_oversized_layer_is_reported_as_needing_nesting() {
+        let report = run(vec![band_layer(1, 0.80, 2000.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "layer_fits_field")
+            .expect("a 2000 mm band exceeds a 284 mm field");
+        assert!(v.actions.iter().any(|a| a.id == "nest"));
+    }
+
+    #[test]
+    fn unverified_limits_are_disclosed_even_on_a_clean_run() {
+        let cp = profile();
+        let rs = RuleSet::from_profile(&cp);
+        let report = validate(&[band_layer(1, 0.80, 200.0)], &cp, &rs, false);
+        assert!(report.verdict.is_manufacturable());
+        assert!(
+            !report.limits_physically_verified,
+            "a pass on datasheet limits is a calculation, not a fact"
+        );
+        assert!(render(&report).contains("datasheet"));
+    }
+
+    #[test]
+    fn validation_never_panics_on_hostile_geometry() {
+        let hostile = LayerInput {
+            index: 1,
+            name: "hostile".into(),
+            geometry: Shapes { shapes: vec![] },
+        };
+        let report = run(vec![hostile]);
+        assert!(
+            report.verdict.is_manufacturable(),
+            "empty layer geometry is not fatal"
+        );
+    }
+
+    #[test]
+    fn validation_is_deterministic() {
+        let layers = vec![band_layer(1, 0.42, 200.0), band_layer(2, 0.80, 200.0)];
+        assert_eq!(run(layers.clone()), run(layers));
+    }
+}

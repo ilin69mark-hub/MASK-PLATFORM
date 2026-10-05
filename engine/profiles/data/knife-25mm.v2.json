@@ -1,0 +1,30 @@
+{
+  "code": "knife-25mm",
+  "version": 2,
+  "name": "Knife plotter, 25 mm holder",
+  "type": "knife_plotter",
+
+  "blade": {
+    "angle_deg": 45,
+    "offset_mm": 0.10,
+    "kerf_mm": 0.15,
+    "curve_tolerance_mm": 0.08,
+    "curve_multiplier": 4
+  },
+
+  "working_area": {
+    "width_mm": 300,
+    "length_mm": 1200,
+    "usable_margin_mm": 8
+  },
+
+  "accuracy": {
+    "repeatability_mm": 0.05,
+    "registration_method": "crosshair_marks",
+    "max_registration_error_mm": 0.30
+  },
+
+  "status": "draft",
+  "verified_physical": false,
+  "notes": "DRAFT. Described from a generic 300 mm knife-plotter class, not from the specific machine, which has not been procured or measured. Working area and kerf must be re-measured before any production use."
+}

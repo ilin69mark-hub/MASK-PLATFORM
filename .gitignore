@@ -58,3 +58,7 @@ Thumbs.db
 *.swp
 # ── Spike (throwaway experiments, kept as ADR evidence) ───────────────
 spike/**/target/
+
+# ── Engine build output ───────────────────────────────────────────────
+engine/target/
+engine/out/

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "profiles",
+    "rules",
+    "validate",
+    "export",
+    "cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+# i_overlay 9.0.0 requires rust >= 1.88 (ADR-0003).
+i_overlay = "9.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+mask-kernel = { path = "kernel" }
+mask-profiles = { path = "profiles" }
+mask-rules = { path = "rules" }
+mask-validate = { path = "validate" }
+mask-export = { path = "export" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

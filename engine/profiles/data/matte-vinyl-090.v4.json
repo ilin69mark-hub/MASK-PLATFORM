@@ -1,0 +1,38 @@
+{
+  "code": "matte-vinyl-090",
+  "version": 4,
+  "name": "Matte vinyl 0.09 mm",
+  "family": "vinyl",
+  "thickness_mm": 0.09,
+
+  "minimums": {
+    "line_width_mm": 0.80,
+    "gap_mm": 0.90,
+    "island_area_mm2": 2.40,
+    "island_width_mm": 0.60,
+    "feature_length_mm": 3.00,
+    "corner_radius_mm": 0.40,
+    "bridge_width_mm": 1.20,
+    "bridge_length_mm": 25.0
+  },
+
+  "physical": {
+    "adhesion": "medium",
+    "adhesive_system": "water_sensitive",
+    "peel_angle_min_deg": 120,
+    "peel_rate": "slow",
+    "max_temp_c": 80,
+    "tolerance_registration_mm": 0.35,
+    "surface_prep": ["degrease", "dry"]
+  },
+
+  "limits": {
+    "max_density_per_100cm2": 180,
+    "min_angle_deg": 30,
+    "max_area_mm2": 400000
+  },
+
+  "status": "draft",
+  "verified_physical": false,
+  "notes": "DRAFT. Limits come from generic datasheet values, not from cutting real film. No physical proof has been performed because no material has been procured yet. A project validated against this profile cannot reach Approved status (MANUFACTURING_ENGINE.md §8). Promote to 'active' only after the physical proof protocol has been executed."
+}

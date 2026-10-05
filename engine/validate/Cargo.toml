@@ -1,0 +1,15 @@
+[package]
+name = "mask-validate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mask-kernel.workspace = true
+mask-rules.workspace = true
+mask-profiles.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

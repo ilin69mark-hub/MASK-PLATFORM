@@ -1,0 +1,50 @@
+{
+  "project_id": "MASK-000127",
+  "revision": 1,
+  "_comment": "Hand-authored centrelines for the walking skeleton. Deliberately mixes a manufacturable layer with two that violate the profile, so the verdict is FAIL and the messages can be reviewed. The lines interlock, cross and loop, which is the target graphic class (LAYER_GRAPH.md).",
+
+  "layers": [
+    {
+      "index": 1,
+      "name": "Black Base",
+      "width_mm": 2.4,
+      "centrelines": [
+        [[40, 40], [500, 40], [700, 180], [1100, 180]],
+        [[40, 700], [400, 700], [620, 520], [1100, 520]],
+        [[40, 200], [40, 640]],
+        [[1100, 240], [1100, 620]]
+      ]
+    },
+    {
+      "index": 2,
+      "name": "Red Base",
+      "width_mm": 1.6,
+      "centrelines": [
+        [[180, 300], [420, 300], [560, 420], [900, 420], [1020, 300]],
+        [[180, 620], [520, 620], [700, 540], [1020, 540]],
+        [[300, 120], [300, 300]]
+      ]
+    },
+    {
+      "index": 3,
+      "name": "White Detail",
+      "width_mm": 0.95,
+      "centrelines": [
+        [[240, 400], [340, 400], [430, 480], [520, 400], [620, 400]],
+        [[700, 400], [780, 480], [860, 400]]
+      ]
+    },
+    {
+      "index": 4,
+      "name": "Gold Accent",
+      "width_mm": 0.55,
+      "_comment": "0.55 mm is below the 0.80 mm minimum of matte-vinyl-090. This layer exists to produce a real violation with a real measurement, not a synthetic one.",
+      "centrelines": [
+        [[140, 160], [140, 640]],
+        [[960, 160], [960, 640]],
+        [[140, 340], [960, 340]],
+        [[140, 460], [960, 460]]
+      ]
+    }
+  ]
+}
