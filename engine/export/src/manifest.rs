@@ -148,11 +148,18 @@ pub fn build_manifest(
         })
         .collect();
 
-    let warnings: Vec<&mask_validate::Violation> = report
-        .violations
-        .iter()
-        .filter(|v| v.severity == Severity::Warning)
-        .collect();
+    // Warning headlines are not duplicated into the manifest: the count lives in
+    // `violations.warning` and the text lives in the validation report. Copying
+    // both would create a second place for the same fact to go stale.
+    debug_assert_eq!(
+        report.counts.warning,
+        report
+            .violations
+            .iter()
+            .filter(|v| v.severity == Severity::Warning)
+            .count(),
+        "warning count and violation list must agree"
+    );
 
     json!({
         "manifest_version": 1,
