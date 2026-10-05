@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned so that "the same build" in ADR-0004 determinism matrix (D2) is a
+# checkable statement rather than an assumption. Update deliberately: a
+# toolchain bump can change tessellation output and therefore artifact hashes.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "default"

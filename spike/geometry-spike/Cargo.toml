@@ -1,0 +1,8 @@
+[package]
+name = "geometry-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+i_overlay = "9.0.0"
