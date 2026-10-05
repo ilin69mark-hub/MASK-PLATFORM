@@ -30,7 +30,7 @@ flowchart TB
 fn offset_grows_contour_by_exact_delta() {
     let square = Square::new(10.0, 10.0);
     let grown = offset(&square, 2.0).unwrap();
-    assert_close(grown.area(), 14.0 * 14.0, eps = 1e-6);
+    assert_close(grown.area(), 14.0 * 14.0, MEASURE_EPS_MM);  // ADR-0004
 }
 
 #[test]
@@ -44,9 +44,13 @@ fn offset_of_thin_strip_collapses_when_smaller_than_delta() {
 fn min_width_of_1mm_line_measures_1mm() {
     let line = Rectangle::new(20.0, 1.0);
     let w = measure_min_width(&line).unwrap();
-    assert_close(w, 1.0, eps = 1e-4);
+    assert_close(w, 1.0, MEASURE_EPS_MM);  // ADR-0004
 }
 ```
+
+> **Все допуски в тестах — именованные константы из ADR-0004.**
+> Литералы вида `1e-6` / `1e-4` в тестах запрещены: они не выражают
+> единицы измерения и расходятся между файлами.
 
 ### Что обязательно покрыто
 
