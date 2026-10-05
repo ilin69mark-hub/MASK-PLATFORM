@@ -7,12 +7,15 @@
 //! This binary is deliberately not a product surface. It exists so that a
 //! physical proof can happen before any API, editor or commerce exists.
 
+mod image_io;
+mod trace;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mask_export::{manifest, tile_to_svg, ArtifactContext, MarksToDraw};
-use mask_kernel::{union, widen, Point, Shapes};
+use mask_kernel::{union, widen, Contour, Point, Shape, Shapes};
 use mask_nesting::{fixed_grid, needs_nesting, NestRequest};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
@@ -38,6 +41,187 @@ struct Args {
     out_dir: PathBuf,
     widen_to: Option<f64>,
     nest: bool,
+}
+
+fn main() -> ExitCode {
+    // `trace` is a separate verb with its own arguments, so dispatch on the
+    // first argument before the production path parses anything.
+    if std::env::args().nth(1).as_deref() == Some("trace") {
+        return match trace_command() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match run(&args) {
+        Ok(true) => ExitCode::SUCCESS,
+        // A failing verdict is a legitimate outcome, not a tool failure.
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `maskctl trace <image> [--part-width-mm] [--quantise] ...`
+fn trace_command() -> Result<(), String> {
+    let mut options = trace::TraceOptions::default();
+    let mut image: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut quiet = false;
+
+    let argv: Vec<String> = std::env::args().skip(2).collect();
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].clone();
+        let take = |i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            argv.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        match argv[i].as_str() {
+            "--part-width-mm" => {
+                let raw = take(&mut i)?;
+                options.part_width_mm = raw
+                    .parse()
+                    .map_err(|_| format!("--part-width-mm expects a number, got {raw:?}"))?;
+            }
+            "--quantise" => {
+                let raw = take(&mut i)?;
+                options.quantise = raw
+                    .parse()
+                    .map_err(|_| format!("--quantise expects a number, got {raw:?}"))?;
+            }
+            "--min-area-mm2" => {
+                let raw = take(&mut i)?;
+                options.min_area_mm2 = raw
+                    .parse()
+                    .map_err(|_| format!("--min-area-mm2 expects a number, got {raw:?}"))?;
+            }
+            "--simplify-mm" => {
+                let raw = take(&mut i)?;
+                options.simplify_mm = raw
+                    .parse()
+                    .map_err(|_| format!("--simplify-mm expects a number, got {raw:?}"))?;
+            }
+            "--max-colours" => {
+                let raw = take(&mut i)?;
+                options.max_colours = raw
+                    .parse()
+                    .map_err(|_| format!("--max-colours expects a number, got {raw:?}"))?;
+            }
+            "--project-id" => options.project_id = take(&mut i)?,
+            "--out" => out = Some(PathBuf::from(take(&mut i)?)),
+            "--quiet" => quiet = true,
+            "-h" | "--help" => return Err(trace_usage()),
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option {other:?}\n\n{}", trace_usage()))
+            }
+            other => {
+                if image.is_some() {
+                    return Err(format!("unexpected second image {other:?}"));
+                }
+                image = Some(PathBuf::from(other));
+            }
+        }
+        i += 1;
+    }
+
+    let image = image.ok_or_else(|| format!("an image path is required\n\n{}", trace_usage()))?;
+    let out = out.unwrap_or_else(|| PathBuf::from("traced.json"));
+
+    let report = trace::run(&image, &options, &out).map_err(|e| e.to_string())?;
+
+    if !quiet {
+        println!("MASK ENGINE · trace");
+        println!(
+            "  image        {}x{} px, {} mm per pixel",
+            report.image_width_px, report.image_height_px, report.mm_per_pixel
+        );
+        println!(
+            "  palette      {} colour(s){}",
+            report.palette.len(),
+            report
+                .palette
+                .iter()
+                .map(|c| format!(" #{:02x}{:02x}{:02x}", c.0, c.1, c.2))
+                .collect::<Vec<_>>()
+                .join("")
+        );
+        for layer in &report.layers {
+            println!(
+                "  layer {:<2}     #{:02x}{:02x}{:02x} {:>9.2} mm²  {:>5} px  {:>3} region(s), {} hole(s), narrowest {}",
+                layer.index,
+                layer.colour.0,
+                layer.colour.1,
+                layer.colour.2,
+                layer.area_mm2,
+                layer.pixels,
+                layer.regions,
+                layer.holes,
+                layer
+                    .narrowest_mm
+                    .map(|w| format!("{w:.2} mm"))
+                    .unwrap_or_else(|| "unknown".into())
+            );
+        }
+        if report.dropped > 0 {
+            println!(
+                "  dropped      {} region(s) below {:.2} mm² ({:.2} mm² total)",
+                report.dropped, options.min_area_mm2, report.dropped_area_mm2
+            );
+        }
+        // Said out loud, because a tolerance wider than a pixel is the difference
+        // between smoothing a staircase and redesigning the figure.
+        if report.worst_simplify_delta > 0.01 {
+            println!(
+                "  note         simplification changed area by {:.1}%;                  one pixel is {} mm. Lower --simplify-mm to keep detail.",
+                report.worst_simplify_delta * 100.0,
+                report.mm_per_pixel
+            );
+        }
+        println!("  fixture      {}", out.display());
+        println!();
+        println!("  Widths are not set. Validate the fixture against a profile before cutting.");
+    }
+    Ok(())
+}
+
+fn trace_usage() -> String {
+    "maskctl trace — image to geometry
+
+USAGE
+  maskctl trace <image.png|image.pgm|image.ppm> [options]
+
+  Produces a fixture with one colour layer per palette entry. It states what
+  is in the picture: it does not choose a cut width, a colour role or a layer
+  order. Those come from the profile and the rules, and the project still has
+  to pass validation.
+
+OPTIONS
+  --part-width-mm <mm>  real width of the finished part. Determines scale;
+                        there is no DPI guess. Default 100
+  --quantise <1-255>    palette step. Lower merges more. Default 32
+  --min-area-mm2 <mm²>  regions below this are reported and dropped. Default 1
+  --simplify-mm <mm>    contour smoothing. Keep it below one pixel. Default 0.01
+  --max-colours <n>     refuse beyond this many colours. Default 6
+  --project-id <id>     identifier written into the fixture
+  --out <file.json>     fixture path. Default traced.json
+  --quiet               print nothing"
+        .to_string()
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -131,11 +315,57 @@ struct FixtureLayer {
     name: String,
     #[serde(default = "default_width")]
     width_mm: f64,
+    #[serde(default)]
     centrelines: Vec<Vec<[f64; 2]>>,
+    /// Filled regions cut along their own outline, with no stroke applied.
+    ///
+    /// Centrelines and regions answer different questions. A centreline says
+    /// "make a line this wide"; a traced image produces an area, and stroking a
+    /// traced outline would double every edge and shrink the hole in the middle.
+    /// Both may appear in one file, but not in one layer.
+    #[serde(default)]
+    regions: Vec<FixtureRegion>,
+}
+
+/// One filled region: an outer contour and its holes, in millimetres.
+#[derive(serde::Deserialize)]
+struct FixtureRegion {
+    outer: Vec<[f64; 2]>,
+    #[serde(default)]
+    holes: Vec<Vec<[f64; 2]>>,
 }
 
 fn default_width() -> f64 {
     1.0
+}
+
+/// Convert a fixture region into validated geometry.
+fn region_to_shape(region: &FixtureRegion) -> Result<Shape, String> {
+    fn contour(points: &[Vec<[f64; 2]>], what: &str) -> Result<Contour, String> {
+        let points = points.first().ok_or_else(|| format!("{what} is empty"))?;
+        if points.len() < 3 {
+            return Err(format!(
+                "{what} needs at least three points, got {}",
+                points.len()
+            ));
+        }
+        Ok(Contour {
+            points: points.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
+            closed: true,
+        })
+    }
+
+    let holes = region
+        .holes
+        .iter()
+        .enumerate()
+        .map(|(i, h)| contour(std::slice::from_ref(h), &format!("hole {i}")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Shape {
+        outer: contour(std::slice::from_ref(&region.outer), "outer contour")?,
+        holes,
+    })
 }
 
 fn load_fixture(path: &Path) -> Result<Fixture, String> {
@@ -151,6 +381,44 @@ fn load_fixture(path: &Path) -> Result<Fixture, String> {
 /// physical piece; leaving them as separate shapes would make a bridge
 /// impossible to represent, and the island check could never pass.
 fn build_layer(layer: &FixtureLayer, widen_to: Option<f64>) -> Result<LayerInput, String> {
+    if !layer.regions.is_empty() && !layer.centrelines.is_empty() {
+        return Err(format!(
+            "layer {} «{}»: a layer has either centrelines or regions, not both. \
+             Mixing them makes the stroke width ambiguous.",
+            layer.index, layer.name
+        ));
+    }
+
+    if !layer.regions.is_empty() {
+        if widen_to.is_some() {
+            return Err(format!(
+                "layer {} «{}»: --widen-to does not apply to regions. They already have \
+                 their final outline; widening them would move the boundary the image asked for.",
+                layer.index, layer.name
+            ));
+        }
+        let mut merged = Shapes::new();
+        for region in &layer.regions {
+            let one = region_to_shape(region)
+                .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
+            // The union merges regions that touch, so a single sheet of film and
+            // the bridge rules see one connected piece.
+            merged = union(&merged, &Shapes { shapes: vec![one] })
+                .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
+        }
+        // Strict: a traced hole with the wrong winding reports a plausible but
+        // wrong area, and a plausible wrong area is the failure this whole
+        // pipeline exists to prevent.
+        merged
+            .validate_strict(mask_kernel::constants::MAX_COORDINATE_MM)
+            .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
+        return Ok(LayerInput {
+            index: layer.index,
+            name: layer.name.clone(),
+            geometry: merged,
+        });
+    }
+
     let width = widen_to.unwrap_or(layer.width_mm);
     let mut merged: Shapes = Shapes::new();
 
@@ -511,24 +779,4 @@ fn run(args: &Args) -> Result<bool, String> {
         "Next: print at 100%, then cut by hand. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
     );
     Ok(report.verdict.is_manufacturable())
-}
-
-fn main() -> ExitCode {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    match run(&args) {
-        Ok(true) => ExitCode::SUCCESS,
-        // A failing verdict is a legitimate outcome, not a tool failure.
-        Ok(false) => ExitCode::from(1),
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(2)
-        }
-    }
 }

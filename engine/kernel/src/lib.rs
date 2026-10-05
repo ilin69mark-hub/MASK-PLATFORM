@@ -14,6 +14,7 @@ pub mod geom;
 pub mod hash;
 pub mod measure;
 pub mod offset;
+pub mod raster;
 
 pub use boolean::{difference, intersection, normalise, union, xor, OverlayError};
 pub use canonical::{canonicalise, canonicalise_shapes, to_path_data};

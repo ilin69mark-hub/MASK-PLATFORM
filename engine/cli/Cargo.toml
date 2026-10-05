@@ -20,3 +20,5 @@ mask-export.workspace = true
 mask-nesting.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+png = "0.18.1"
+thiserror = { workspace = true, features = ["std"] }
