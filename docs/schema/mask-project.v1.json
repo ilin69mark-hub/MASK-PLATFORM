@@ -1,0 +1,633 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maskplatform.dev/schema/mask-project.v1.json",
+  "title": "Mask Project v1",
+  "description": "Complete digital description of the production of one multilayer physical mask for a specific vehicle part. The source of truth of the system: SVG/DXF/PLT/PDF are derived artifacts. Units are millimetres (ADR-0004).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "status",
+    "owner",
+    "source",
+    "target",
+    "geometry",
+    "composition",
+    "manufacturing",
+    "lineage"
+  ],
+
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^MASK-[0-9]{6}$",
+      "description": "Stable public identifier, printed on the physical mask. Never reused. (GLOSSARY)"
+    },
+    "status": { "$ref": "#/$defs/projectStatus" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+
+    "owner": { "$ref": "#/$defs/owner" },
+    "source": { "$ref": "#/$defs/source" },
+    "target": { "$ref": "#/$defs/target" },
+    "geometry": { "$ref": "#/$defs/designSpace" },
+    "composition": { "$ref": "#/$defs/composition" },
+    "manufacturing": { "$ref": "#/$defs/manufacturing" },
+    "validation": { "$ref": "#/$defs/validationSummary" },
+    "instructions": { "$ref": "#/$defs/instructions" },
+    "production_files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/productionFile" }
+    },
+    "revisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/revision" },
+      "description": "Omitted in the current-revision document; full history lives in its own record."
+    },
+    "lineage": { "$ref": "#/$defs/lineage" }
+  },
+
+  "$defs": {
+
+    "projectStatus": {
+      "type": "string",
+      "enum": [
+        "Draft",
+        "Processing",
+        "NeedsWork",
+        "NeedsReview",
+        "Approved",
+        "Ordered",
+        "InProduction",
+        "Completed",
+        "Failed",
+        "Archived"
+      ]
+    },
+
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "PASS_WITH_WARNINGS", "FAIL", "FATAL"]
+    },
+
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "error", "fatal"]
+    },
+
+    "layerRole": {
+      "type": "string",
+      "enum": [
+        "base",
+        "shadow",
+        "highlight",
+        "gradient",
+        "detail",
+        "stencil",
+        "shim",
+        "cutaway"
+      ]
+    },
+
+    "relationType": {
+      "type": "string",
+      "enum": [
+        "under",
+        "over",
+        "intersects",
+        "bridges",
+        "nested_in",
+        "masks",
+        "depends_on",
+        "same_paint_op"
+      ]
+    },
+
+    "mm": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10000,
+      "description": "A length in millimetres. Non-negative; 10000 mm is far beyond any vehicle part."
+    },
+
+    "mm2": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100000000,
+      "description": "An area in square millimetres. Separate from mm because the units differ: a hood panel is ~1.5 m², i.e. 1.5e6 mm², well beyond any length bound."
+    },
+
+    "fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+
+    "layerCode": {
+      "type": "string",
+      "pattern": "^L(0[1-9]|[1-5][0-9]|6[0-4])-[0-9a-f]{4}$",
+      "description": "Layer identifier: L + zero-padded index 01..64 + short id (GLOSSARY)."
+    },
+
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "contact": { "type": "string" }
+      }
+    },
+
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "assets"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["user_image", "user_vector", "catalog_design"]
+        },
+        "assets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/asset" }
+        },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/provenanceStep" },
+          "description": "How the vector geometry was derived from the raster, including which component and parameters produced it."
+        }
+      }
+    },
+
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "role", "mime"],
+      "properties": {
+        "asset_id": { "type": "string", "minLength": 1 },
+        "role": {
+          "type": "string",
+          "enum": ["original", "ai_mask", "derived", "reference"]
+        },
+        "mime": {
+          "type": "string",
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/svg+xml",
+            "application/pdf"
+          ]
+        },
+        "width_px": { "type": "integer", "minimum": 1 },
+        "height_px": { "type": "integer", "minimum": 1 },
+        "color_space": { "type": "string", "enum": ["sRGB", "Display P3", "CMYK"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "storage_key": { "type": "string", "minLength": 1 },
+        "generated_by": { "$ref": "#/$defs/provenanceStep" }
+      }
+    },
+
+    "provenanceStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step"],
+      "properties": {
+        "step": {
+          "type": "string",
+          "enum": [
+            "background_removal",
+            "segmentation",
+            "color_separation",
+            "vectorize",
+            "simplify",
+            "manual_edit",
+            "autofix",
+            "fit_to_part"
+          ]
+        },
+        "at": { "type": "string", "format": "date-time" },
+        "component": { "type": "string" },
+        "model": { "type": "string" },
+        "params": { "type": "object" }
+      }
+    },
+
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_model_id", "part"],
+      "properties": {
+        "object_model_id": { "type": "string", "minLength": 1 },
+        "brand": { "type": "string" },
+        "model": { "type": "string" },
+        "generation": { "type": "string" },
+        "year_from": { "type": "integer", "minimum": 1900, "maximum": 2100 },
+        "year_to": { "type": "integer", "minimum": 1900, "maximum": 2100 },
+        "part": { "$ref": "#/$defs/part" }
+      }
+    },
+
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code", "name", "real_width_mm", "real_height_mm"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "real_width_mm": { "$ref": "#/$defs/mm" },
+        "real_height_mm": { "$ref": "#/$defs/mm" },
+        "surface_id": { "type": "string" },
+        "mapping": { "$ref": "#/$defs/mapping" }
+      }
+    },
+
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["abstract_rect", "ortho_2d", "planar_2_5d", "nurbs", "mesh"],
+          "description": "Geometry representation level (MODEL_FIT.md §4)."
+        },
+        "uv_bounds": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/fraction" }
+        },
+        "curvature": { "type": "string", "enum": ["flat", "low", "medium", "high"] },
+        "max_slope_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "forbidden_zones": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "designSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["design_space", "units"],
+      "properties": {
+        "design_space": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width_mm", "height_mm"],
+          "properties": {
+            "width_mm": { "$ref": "#/$defs/mm" },
+            "height_mm": { "$ref": "#/$defs/mm" },
+            "origin": { "type": "string", "enum": ["part_uv_origin", "project_origin"] },
+            "scale_policy": {
+              "type": "string",
+              "enum": [
+                "fit_into_part_bounds_preserve_aspect",
+                "exact_part_size",
+                "custom"
+              ],
+              "description": "Non-uniform stretching is not an option (MODEL_FIT.md §6)."
+            }
+          }
+        },
+        "transform": { "$ref": "#/$defs/transform" },
+        "units": { "const": "mm" },
+        "tolerance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "flatten_mm": { "$ref": "#/$defs/mm" },
+            "bool_epsilon_mm": { "$ref": "#/$defs/mm" }
+          },
+          "description": "Snapshot of the profile-derived tolerances active for this project (ADR-0004)."
+        }
+      }
+    },
+
+    "transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "affine", "projective"] },
+        "matrix": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "type": "number" }
+        }
+      }
+    },
+
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layers", "graph"],
+      "properties": {
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "description": "Physical layers. At least one layer is invariant I-1. Layer index uniqueness (I-2) is enforced in the database constraint and in Validator, not here.",
+          "items": { "$ref": "#/$defs/layer" }
+        },
+        "graph": { "$ref": "#/$defs/layerGraph" }
+      }
+    },
+
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "index", "name", "role", "paint", "geometry_id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/layerCode" },
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Application order, 01..NN. Printed as 01 in instructions."
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "role": { "$ref": "#/$defs/layerRole" },
+        "visible": { "type": "boolean", "default": true },
+        "paint": { "$ref": "#/$defs/paintSpec" },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["adhesive", "cut", "weed", "laminate"]
+          }
+        },
+        "geometry_id": { "type": "string", "minLength": 1 },
+        "nesting_required": { "type": "boolean" },
+        "metrics": { "$ref": "#/$defs/layerMetrics" }
+      }
+    },
+
+    "paintSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "system"],
+      "properties": {
+        "type": { "type": "string", "enum": ["solid", "gradient"] },
+        "system": {
+          "type": "string",
+          "enum": [
+            "basecoat",
+            "clear",
+            "translucent",
+            "detail",
+            "metallic",
+            "none"
+          ],
+          "description": "none is used by stencil/shim layers that carry no paint."
+        },
+        "rgb": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "technique": {
+          "type": "string",
+          "enum": ["brush", "airbrush_0_3G", "airbrush_1_5G", "spray_can", "none"],
+          "description": "Part of the physical layer identity (LAYER_ENGINE.md §8)."
+        },
+        "coat": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "opacity": { "$ref": "#/$defs/fraction" },
+        "tolerance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "delta_e": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+
+    "layerMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": { "type": "integer", "minimum": 0 },
+        "islands": { "type": "integer", "minimum": 0 },
+        "holes": { "type": "integer", "minimum": 0 },
+        "bridges": { "type": "integer", "minimum": 0 },
+        "min_width_mm": { "$ref": "#/$defs/mm" },
+        "min_gap_mm": { "$ref": "#/$defs/mm" },
+        "area_mm2": { "$ref": "#/$defs/mm2" },
+        "bbox_mm": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/mm" }
+        }
+      }
+    },
+
+    "layerGraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "nodes", "edges"],
+      "properties": {
+        "version": { "const": 1 },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/layerCode" }
+        },
+        "is_acyclic": { "type": "boolean" },
+        "topological_order": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/layerCode" }
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relation" }
+        }
+      }
+    },
+
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "type"],
+      "properties": {
+        "from": { "$ref": "#/$defs/layerCode" },
+        "to": { "$ref": "#/$defs/layerCode" },
+        "type": { "$ref": "#/$defs/relationType" },
+        "tolerance_mm": { "$ref": "#/$defs/mm" }
+      }
+    },
+
+    "manufacturing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["material_profile", "plotter_profile"],
+      "properties": {
+        "material_profile": { "$ref": "#/$defs/profileRef" },
+        "plotter_profile": { "$ref": "#/$defs/profileRef" },
+        "cutting_profile": { "type": "string" },
+        "ruleset_id": { "type": "string" },
+        "nesting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" },
+            "plan_id": { "type": "string" },
+            "tiles": { "type": "integer", "minimum": 0 },
+            "waste_ratio": { "$ref": "#/$defs/fraction" }
+          }
+        },
+        "process": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "surface_prep": { "type": "array", "items": { "type": "string" } },
+            "adhesive": { "type": "string" },
+            "peel": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "version"],
+      "description": "Snapshot reference. A project must never depend on a mutable current profile (ADR-0004, invariant I-7).",
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]+$" }
+      }
+    },
+
+    "validationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "last_run_id": { "type": "string", "pattern": "^RUN-[0-9]{6}$" },
+        "violations_error": { "type": "integer", "minimum": 0 },
+        "violations_warning": { "type": "integer", "minimum": 0 },
+        "violations_info": { "type": "integer", "minimum": 0 },
+        "auto_fix_applied": { "type": "integer", "minimum": 0 },
+        "fidelity": { "$ref": "#/$defs/fraction" }
+      },
+      "allOf": [
+        {
+          "comment": "Invariant I-5: PASS implies zero error-severity violations.",
+          "if": {
+            "properties": {
+              "verdict": { "enum": ["PASS", "PASS_WITH_WARNINGS"] }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "violations_error": { "const": 0 }
+            }
+          }
+        }
+      ]
+    },
+
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_id"],
+      "properties": {
+        "current_id": { "type": "string", "minLength": 1 },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "format": { "type": "string", "enum": ["markdown", "html", "pdf"] },
+        "generated_by": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "engine": { "type": "string" },
+            "ai_polish": { "type": "boolean" },
+            "numbers_verified": {
+              "type": "boolean",
+              "description": "True only if every figure in the text was matched back to project data (AI_ARCHITECTURE.md §4.4)."
+            }
+          }
+        }
+      }
+    },
+
+    "productionFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "storage_key", "sha256", "bytes"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "cut_svg",
+            "cut_dxf",
+            "cut_plt",
+            "mask_sheet_pdf",
+            "instruction_pdf",
+            "manifest",
+            "preview_png",
+            "preview_webp"
+          ]
+        },
+        "layer": { "$ref": "#/$defs/layerCode" },
+        "tile": { "type": "string", "pattern": "^[A-Z][0-9]+$" },
+        "storage_key": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "at", "summary"],
+      "properties": {
+        "n": { "type": "integer", "minimum": 1 },
+        "at": { "type": "string", "format": "date-time" },
+        "summary": { "type": "string", "minLength": 1 },
+        "author": {
+          "type": "string",
+          "enum": ["user", "engine", "autofix", "system"]
+        },
+        "geometry_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]+$" }
+      }
+    },
+
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine_version", "rule_engine_version"],
+      "description": "Invariant I-8: artifacts carry the engine version. Without this, reproduction cannot be verified.",
+      "properties": {
+        "engine_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "rule_engine_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "lib_math_mode": {
+          "type": "string",
+          "enum": ["Integer", "Float"],
+          "description": "Pinned globally; a different value means the result is not deterministic (ADR-0004 D5)."
+        },
+        "revisions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/revision" }
+        }
+      }
+    },
+
+    "sha256": {
+      "type": "string",
+      "pattern": "^(sha256:)?[0-9a-f]{64}$"
+    }
+  }
+}

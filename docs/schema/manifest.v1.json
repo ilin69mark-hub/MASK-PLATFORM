@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maskplatform.dev/schema/manifest.v1.json",
+  "title": "Production Manifest v1",
+  "description": "Machine-readable description of everything needed to physically produce a mask. This is the file a third party checks first: it states whether the project was ever validated, under which profiles, and whether the artifacts are intact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "project",
+    "target",
+    "manufacturing",
+    "validation",
+    "lineage",
+    "layers",
+    "artifacts",
+    "signatures"
+  ],
+
+  "properties": {
+    "manifest_version": { "const": 1 },
+
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "status"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^MASK-[0-9]{6}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "Draft",
+            "Processing",
+            "NeedsWork",
+            "NeedsReview",
+            "Approved",
+            "Ordered",
+            "InProduction",
+            "Completed",
+            "Failed",
+            "Archived"
+          ]
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "generated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object", "part", "part_code", "dimensions_mm"],
+      "properties": {
+        "object": { "type": "string" },
+        "part": { "type": "string" },
+        "part_code": { "type": "string" },
+        "dimensions_mm": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    },
+
+    "manufacturing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["material", "plotter", "cutting_profile", "effective_limits"],
+      "properties": {
+        "material": { "$ref": "#/$defs/profileRef" },
+        "plotter": { "$ref": "#/$defs/profileRef" },
+        "cutting_profile": { "type": "string" },
+        "kerf_mm": { "type": "number", "minimum": 0 },
+        "effective_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The actual numeric limits enforced during validation, derived from the profiles. A reader must never have to derive these again.",
+          "properties": {
+            "line_width_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "gap_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "island_width_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "corner_radius_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "bridge_width_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "max_features_per_100cm2": { "type": "number", "exclusiveMinimum": 0 },
+            "max_tile_width_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "max_tile_length_mm": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "physical_proof"],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": ["PASS", "PASS_WITH_WARNINGS", "FAIL", "FATAL"]
+        },
+        "report_id": { "type": "string" },
+        "physical_proof": { "$ref": "#/$defs/physicalProof" },
+        "violations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["error"],
+          "properties": {
+            "fatal": { "type": "integer", "minimum": 0 },
+            "error": { "type": "integer", "minimum": 0 },
+            "warning": { "type": "integer", "minimum": 0 },
+            "info": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "fidelity": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "allOf": [
+        {
+          "comment": "Invariant I-5, restated for consumers: a passing manifest has no error violations.",
+          "if": {
+            "properties": {
+              "verdict": { "enum": ["PASS", "PASS_WITH_WARNINGS"] }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "violations": {
+                "properties": { "error": { "const": 0 } }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine_version", "rule_engine_version"],
+      "properties": {
+        "engine_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "rule_engine_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "geometry_hash": { "type": "string", "pattern": "^(sha256:)?[0-9a-f]{64}$" },
+        "lib_math_mode": { "type": "string", "enum": ["Integer", "Float"] }
+      }
+    },
+
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/layerEntry" }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "file", "sha256", "bytes"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "cut_svg",
+              "cut_dxf",
+              "cut_plt",
+              "mask_sheet_pdf",
+              "instruction_pdf",
+              "manifest",
+              "preview_png",
+              "preview_webp"
+            ]
+          },
+          "layer": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "tile": { "type": "string" },
+          "file": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+
+    "signatures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generated_by"],
+      "properties": {
+        "generated_by": {
+          "type": "string",
+          "pattern": "^export-engine/[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "manifest_hash": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+
+  "$defs": {
+    "physicalProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Present once a real mask has been cut and applied. Until then the limits in this manifest are unverified datasheet values, and the manifest must say so.",
+      "required": ["performed"],
+      "properties": {
+        "performed": { "type": "boolean" },
+        "date": { "type": "string", "format": "date" },
+        "material_lot": { "type": "string" },
+        "result": {
+          "type": "string",
+          "enum": ["pass", "pass_with_defects", "fail", "rejected"]
+        },
+        "duration_min": { "type": "integer", "minimum": 0 },
+        "defects": { "type": "array", "items": { "type": "object" } },
+        "notes": { "type": "string" },
+        "inspector": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "comment": "performed=false means no date may be claimed.",
+          "if": { "properties": { "performed": { "const": true } }, "required": ["performed"] },
+          "then": {
+            "required": ["date", "result"],
+            "properties": { "performed": { "const": true } }
+          }
+        }
+      ]
+    },
+
+    "layerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "id", "name", "role"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "id": { "type": "string", "pattern": "^L(0[1-9]|[1-5][0-9]|6[0-4])-[0-9a-f]{4}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "role": {
+          "type": "string",
+          "enum": [
+            "base",
+            "shadow",
+            "highlight",
+            "gradient",
+            "detail",
+            "stencil",
+            "shim",
+            "cutaway"
+          ]
+        },
+        "paint": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rgb": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+            },
+            "system": { "type": "string" },
+            "technique": { "type": "string" }
+          }
+        },
+        "application": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Figures consumed verbatim by the instruction generator. Never invented by AI.",
+          "properties": {
+            "distance_mm": { "type": "number", "minimum": 0 },
+            "angle_deg": { "type": "number", "minimum": 0, "maximum": 180 },
+            "passes": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "dry_minutes": { "type": "integer", "minimum": 0 },
+            "sequence": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "tiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "file", "sha256"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Z][0-9]+$" },
+              "file": { "type": "string", "minLength": 1 },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        "elements": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "paths": { "type": "integer", "minimum": 0 },
+            "islands": { "type": "integer", "minimum": 0 },
+            "bridges": { "type": "integer", "minimum": 0 },
+            "min_width_mm": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "version"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]+$" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "active", "superseded", "deprecated"],
+          "description": "A draft profile has unverified limits (MANUFACTURING_ENGINE.md §8)."
+        }
+      }
+    },
+
+    "sha256": {
+      "type": "string",
+      "pattern": "^(sha256:)?[0-9a-f]{64}$"
+    }
+  }
+}

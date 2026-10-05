@@ -1,0 +1,321 @@
+{
+  "schema_version": 1,
+  "id": "MASK-000127",
+  "status": "NeedsReview",
+  "created_at": "2026-01-14T09:12:44Z",
+  "updated_at": "2026-01-15T16:03:10Z",
+  "owner": {
+    "id": "usr_4a91",
+    "display_name": "K. Weber",
+    "contact": "ke@example.invalid"
+  },
+  "source": {
+    "kind": "user_image",
+    "assets": [
+      {
+        "asset_id": "ast_01",
+        "role": "original",
+        "mime": "image/png",
+        "width_px": 3400,
+        "height_px": 2200,
+        "color_space": "sRGB",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "storage_key": "projects/MASK-000127/source/original.png"
+      },
+      {
+        "asset_id": "ast_02",
+        "role": "ai_mask",
+        "mime": "image/png",
+        "generated_by": {
+          "step": "segmentation",
+          "component": "segmenter-v2",
+          "model": "segmenter-v2",
+          "params": {
+            "confidence_threshold": 0.72
+          }
+        }
+      }
+    ],
+    "provenance": [
+      {
+        "step": "background_removal",
+        "at": "2026-01-14T09:13:02Z",
+        "params": {}
+      },
+      {
+        "step": "vectorize",
+        "at": "2026-01-14T09:14:40Z",
+        "params": {
+          "tolerance_mm": 0.05
+        }
+      }
+    ]
+  },
+  "target": {
+    "object_model_id": "om_audi_a4_b9",
+    "brand": "Audi",
+    "model": "A4",
+    "generation": "B9",
+    "year_from": 2008,
+    "year_to": 2012,
+    "part": {
+      "id": "pt_a4b9_hood",
+      "code": "HOOD",
+      "name": "Hood / Bonnet",
+      "real_width_mm": 1412.0,
+      "real_height_mm": 1046.0,
+      "surface_id": "sf_hood_outer",
+      "mapping": {
+        "kind": "planar_2_5d",
+        "uv_bounds": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "curvature": "medium",
+        "max_slope_deg": 14.0,
+        "forbidden_zones": [
+          "badge_mount",
+          "wiper_pit",
+          "emboss_logo"
+        ]
+      }
+    }
+  },
+  "geometry": {
+    "design_space": {
+      "width_mm": 1412.0,
+      "height_mm": 1046.0,
+      "origin": "part_uv_origin",
+      "scale_policy": "fit_into_part_bounds_preserve_aspect"
+    },
+    "transform": {
+      "kind": "affine",
+      "matrix": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    "units": "mm",
+    "tolerance": {
+      "flatten_mm": 0.05,
+      "bool_epsilon_mm": 0.001
+    }
+  },
+  "composition": {
+    "layers": [
+      {
+        "id": "L01-4f2a",
+        "index": 1,
+        "name": "Black Base",
+        "role": "base",
+        "paint": {
+          "type": "solid",
+          "system": "basecoat",
+          "rgb": [
+            17,
+            17,
+            19
+          ],
+          "technique": "airbrush_1_5G",
+          "coat": 1,
+          "opacity": 1.0
+        },
+        "operations": [
+          "adhesive",
+          "cut"
+        ],
+        "geometry_id": "geo_L01",
+        "nesting_required": false,
+        "metrics": {
+          "paths": 12,
+          "islands": 0,
+          "holes": 2,
+          "min_width_mm": 1.42,
+          "min_gap_mm": 1.3,
+          "area_mm2": 412300.0,
+          "bbox_mm": [
+            1330.0,
+            980.0
+          ]
+        }
+      },
+      {
+        "id": "L03-0b83",
+        "index": 3,
+        "name": "Red Base",
+        "role": "base",
+        "paint": {
+          "type": "solid",
+          "system": "basecoat",
+          "rgb": [
+            196,
+            24,
+            32
+          ],
+          "technique": "airbrush_1_5G",
+          "coat": 1
+        },
+        "operations": [
+          "adhesive",
+          "cut"
+        ],
+        "geometry_id": "geo_L03",
+        "nesting_required": true,
+        "metrics": {
+          "paths": 15,
+          "islands": 3,
+          "holes": 1,
+          "min_width_mm": 0.81,
+          "min_gap_mm": 1.05,
+          "area_mm2": 18400.0,
+          "bbox_mm": [
+            1330.0,
+            980.0
+          ]
+        }
+      },
+      {
+        "id": "L06-c90f",
+        "index": 6,
+        "name": "Detail",
+        "role": "detail",
+        "paint": {
+          "type": "solid",
+          "system": "detail",
+          "rgb": [
+            214,
+            176,
+            38
+          ],
+          "technique": "airbrush_0_3G",
+          "coat": 1
+        },
+        "operations": [
+          "adhesive",
+          "cut"
+        ],
+        "geometry_id": "geo_L06",
+        "nesting_required": true,
+        "metrics": {
+          "paths": 23,
+          "islands": 5,
+          "holes": 0,
+          "min_width_mm": 0.8,
+          "min_gap_mm": 1.1,
+          "area_mm2": 3200.0,
+          "bbox_mm": [
+            1330.0,
+            980.0
+          ]
+        }
+      }
+    ],
+    "graph": {
+      "version": 1,
+      "nodes": [
+        "L01-4f2a",
+        "L03-0b83",
+        "L06-c90f"
+      ],
+      "is_acyclic": true,
+      "topological_order": [
+        "L01-4f2a",
+        "L03-0b83",
+        "L06-c90f"
+      ],
+      "edges": [
+        {
+          "from": "L01-4f2a",
+          "to": "L03-0b83",
+          "type": "under"
+        },
+        {
+          "from": "L03-0b83",
+          "to": "L06-c90f",
+          "type": "under"
+        },
+        {
+          "from": "L06-c90f",
+          "to": "L03-0b83",
+          "type": "bridges"
+        }
+      ]
+    }
+  },
+  "manufacturing": {
+    "material_profile": {
+      "code": "matte-vinyl-090",
+      "version": 4,
+      "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "plotter_profile": {
+      "code": "knife-25mm",
+      "version": 2,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "cutting_profile": "matv090__knife25__v4_2",
+    "ruleset_id": "rs_matv090_knife25_v4_2",
+    "nesting": {
+      "required": true,
+      "plan_id": "nest_004512",
+      "tiles": 9,
+      "waste_ratio": 0.187
+    }
+  },
+  "validation": {
+    "verdict": "PASS_WITH_WARNINGS",
+    "last_run_id": "RUN-004512",
+    "violations_error": 0,
+    "violations_warning": 2,
+    "violations_info": 5,
+    "auto_fix_applied": 9,
+    "fidelity": 0.912
+  },
+  "instructions": {
+    "current_id": "ins_004512",
+    "languages": [
+      "en"
+    ],
+    "format": "markdown",
+    "generated_by": {
+      "engine": "instruction",
+      "ai_polish": true,
+      "numbers_verified": true
+    }
+  },
+  "production_files": [
+    {
+      "kind": "cut_svg",
+      "layer": "L01-4f2a",
+      "tile": "A1",
+      "storage_key": "projects/MASK-000127/artifacts/L01_A1.svg",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bytes": 18422
+    }
+  ],
+  "lineage": {
+    "engine_version": "0.4.2",
+    "rule_engine_version": "1.1.0",
+    "lib_math_mode": "Integer",
+    "revisions": [
+      {
+        "n": 1,
+        "at": "2026-01-14T09:12:44Z",
+        "summary": "created from source",
+        "author": "user"
+      },
+      {
+        "n": 2,
+        "at": "2026-01-14T09:31:02Z",
+        "summary": "auto-fix: widen 7 paths, add 2 bridges",
+        "author": "autofix"
+      }
+    ]
+  }
+}

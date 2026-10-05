@@ -1,0 +1,156 @@
+{
+  "manifest_version": 1,
+  "project": {
+    "id": "MASK-000127",
+    "revision": 4,
+    "status": "Approved",
+    "created_at": "2026-01-15T16:03:10Z",
+    "generated_at": "2026-01-15T16:04:00Z"
+  },
+  "target": {
+    "object": "Audi A4 B9",
+    "part": "Hood",
+    "part_code": "HOOD",
+    "dimensions_mm": [
+      1412.0,
+      1046.0
+    ]
+  },
+  "manufacturing": {
+    "material": {
+      "code": "matte-vinyl-090",
+      "version": 4,
+      "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "active"
+    },
+    "plotter": {
+      "code": "knife-25mm",
+      "version": 2,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "cutting_profile": "matv090__knife25__v4_2",
+    "kerf_mm": 0.15,
+    "effective_limits": {
+      "line_width_mm": 0.8,
+      "gap_mm": 0.95,
+      "island_width_mm": 0.6,
+      "corner_radius_mm": 0.45,
+      "bridge_width_mm": 1.3,
+      "max_features_per_100cm2": 170,
+      "max_tile_width_mm": 284.0,
+      "max_tile_length_mm": 1184.0
+    }
+  },
+  "validation": {
+    "verdict": "PASS_WITH_WARNINGS",
+    "report_id": "val_004512",
+    "violations": {
+      "error": 0,
+      "warning": 2,
+      "info": 5
+    },
+    "fidelity": 0.912,
+    "physical_proof": {
+      "performed": false,
+      "notes": "Material not yet procured; limits are datasheet values, not measurements."
+    }
+  },
+  "lineage": {
+    "engine_version": "0.4.2",
+    "rule_engine_version": "1.1.0",
+    "geometry_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "lib_math_mode": "Integer"
+  },
+  "layers": [
+    {
+      "index": 1,
+      "id": "L01-4f2a",
+      "name": "Black Base",
+      "role": "base",
+      "paint": {
+        "rgb": [
+          17,
+          17,
+          19
+        ],
+        "system": "basecoat",
+        "technique": "airbrush_1_5G"
+      },
+      "application": {
+        "distance_mm": 120,
+        "angle_deg": 90,
+        "passes": 1,
+        "dry_minutes": 15,
+        "sequence": 1
+      },
+      "tiles": [
+        {
+          "id": "A1",
+          "file": "MASK-000127_rev4_L01_A1.svg",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "elements": {
+        "paths": 12,
+        "islands": 0,
+        "bridges": 0,
+        "min_width_mm": 1.42
+      }
+    },
+    {
+      "index": 3,
+      "id": "L03-0b83",
+      "name": "Red Base",
+      "role": "base",
+      "paint": {
+        "rgb": [
+          196,
+          24,
+          32
+        ],
+        "system": "basecoat",
+        "technique": "airbrush_1_5G"
+      },
+      "application": {
+        "distance_mm": 120,
+        "angle_deg": 90,
+        "passes": 1,
+        "dry_minutes": 15,
+        "sequence": 3
+      },
+      "tiles": [
+        {
+          "id": "A1",
+          "file": "MASK-000127_rev4_L03_A1.svg",
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "elements": {
+        "paths": 15,
+        "islands": 3,
+        "bridges": 2,
+        "min_width_mm": 0.81
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "cut_svg",
+      "layer": 1,
+      "tile": "A1",
+      "file": "MASK-000127_rev4_L01_A1.svg",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "bytes": 18422
+    },
+    {
+      "kind": "manifest",
+      "file": "MASK-000127_rev4_manifest.json",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "bytes": 4210
+    }
+  ],
+  "signatures": {
+    "generated_by": "export-engine/0.4.2",
+    "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
