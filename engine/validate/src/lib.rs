@@ -11,7 +11,8 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, meets_threshold, min_width, shapes_area, Contour, Point, Shape, Shapes,
+    bounding_box, meets_threshold, min_width, shapes_area, unanchored_islands, Contour, Point,
+    Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -291,14 +292,50 @@ fn check_layer(
         }
     }
 
-    // island_anchored — an island with no bridge falls off the part.
+    // island_anchored — a region nested inside another region's hole cannot be
+    // applied as a separate piece and must be held by a bridge.
+    //
+    // Disjoint regions are deliberately not flagged: a mask layer cut from one
+    // sheet yields separate pieces of film, each applied on its own.
     if let Some(rule) = rules.rule("island_anchored") {
-        // Every shape in the set is disconnected from the others by
-        // definition, so a single-region layer has no unanchored island.
-        // Multi-region layers need bridges; that check lands with the nesting
-        // and bridge stages.
-        let _ = rule;
-        let _ = profile;
+        let islands = unanchored_islands(&layer.geometry);
+        if !islands.is_empty() {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: None,
+                required: Some(limits.line_width_mm),
+                count: islands.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} островков не соединены с маской.",
+                    layer.index,
+                    layer.name,
+                    islands.len()
+                ),
+                reason: "При снятии маски островок выпадет и повредит деталь.".into(),
+                actions: vec![
+                    Action {
+                        id: "add_bridge".into(),
+                        label: "Добавить мосты".into(),
+                        primary: true,
+                        estimated_fidelity_loss: Some(0.004),
+                    },
+                    Action {
+                        id: "merge_island".into(),
+                        label: "Объединить с соседним элементом".into(),
+                        primary: false,
+                        estimated_fidelity_loss: Some(0.01),
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
     }
 }
 
@@ -592,6 +629,122 @@ mod tests {
             report.verdict.is_manufacturable(),
             "empty layer geometry is not fatal"
         );
+    }
+
+    #[test]
+    fn a_nested_island_without_a_bridge_is_rejected() {
+        // A ring with a hole, and a patch floating inside that hole. Applied
+        // as drawn, the inner patch has nothing holding it.
+        let outer = Shape::with_holes(
+            Contour {
+                points: vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 20.0, y: 0.0 },
+                    Point { x: 20.0, y: 20.0 },
+                    Point { x: 0.0, y: 20.0 },
+                ],
+                closed: true,
+            },
+            vec![Contour {
+                points: vec![
+                    Point { x: 5.0, y: 5.0 },
+                    Point { x: 15.0, y: 5.0 },
+                    Point { x: 15.0, y: 15.0 },
+                    Point { x: 5.0, y: 15.0 },
+                ],
+                closed: true,
+            }],
+        );
+        let patch = Shape::new(Contour {
+            points: vec![
+                Point { x: 8.0, y: 8.0 },
+                Point { x: 12.0, y: 8.0 },
+                Point { x: 12.0, y: 12.0 },
+                Point { x: 8.0, y: 12.0 },
+            ],
+            closed: true,
+        });
+        let layer = LayerInput {
+            index: 1,
+            name: "Nested".into(),
+            geometry: Shapes {
+                shapes: vec![outer, patch],
+            },
+        };
+        let report = run(vec![layer]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "island_anchored")
+            .expect("an unbridged nested island must be reported");
+        assert_eq!(v.count, 1);
+        assert!(v.actions.iter().any(|a| a.id == "add_bridge"));
+    }
+
+    #[test]
+    fn a_nested_island_with_a_bridge_is_accepted() {
+        // Same geometry, but the patch overlaps the ring, so a union closes the
+        // hole and nothing is left floating.
+        let outer = Shape::with_holes(
+            Contour {
+                points: vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 20.0, y: 0.0 },
+                    Point { x: 20.0, y: 20.0 },
+                    Point { x: 0.0, y: 20.0 },
+                ],
+                closed: true,
+            },
+            vec![Contour {
+                points: vec![
+                    Point { x: 5.0, y: 5.0 },
+                    Point { x: 15.0, y: 5.0 },
+                    Point { x: 15.0, y: 15.0 },
+                    Point { x: 5.0, y: 15.0 },
+                ],
+                closed: true,
+            }],
+        );
+        let bridged = Shape::new(Contour {
+            points: vec![
+                Point { x: 8.0, y: 8.0 },
+                Point { x: 14.0, y: 8.0 },
+                Point { x: 14.0, y: 12.0 },
+                Point { x: 8.0, y: 12.0 },
+            ],
+            closed: true,
+        });
+        let merged = mask_kernel::union(
+            &Shapes {
+                shapes: vec![outer],
+            },
+            &Shapes {
+                shapes: vec![bridged],
+            },
+        )
+        .unwrap();
+        let report = run(vec![LayerInput {
+            index: 1,
+            name: "Bridged".into(),
+            geometry: merged,
+        }]);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "island_anchored"),
+            "a bridged island must not be reported: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn disjoint_regions_are_not_flagged_as_islands() {
+        let report = run(vec![band_layer(1, 0.80, 60.0), band_layer(2, 0.80, 60.0)]);
+        assert!(!report
+            .violations
+            .iter()
+            .any(|v| v.code == "island_anchored"));
     }
 
     #[test]

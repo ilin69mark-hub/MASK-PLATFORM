@@ -2,7 +2,7 @@
 //! are computed from canonical geometry and reported at a defined precision.
 
 use crate::constants::{report, MIN_WIDTH_EPS_MM};
-use crate::geom::{Contour, Shape, Shapes};
+use crate::geom::{Contour, Point, Shape, Shapes};
 
 /// Signed area of one contour via the shoelace formula.
 ///
@@ -77,6 +77,12 @@ pub fn bounding_box(shapes: &Shapes) -> (f64, f64, f64, f64) {
         return (0.0, 0.0, 0.0, 0.0);
     }
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// Bounding box of one shape as `(min_x, min_y, width, height)`.
+#[must_use]
+pub fn shape_bounds(shape: &Shape) -> (f64, f64, f64, f64) {
+    bounding_box(&Shapes::single(shape.clone()))
 }
 
 /// Number of distinct connected regions, i.e. islands within one mask layer.
@@ -203,5 +209,206 @@ mod tests {
             format_measurement(0.42, 0.80),
             "0.420 mm (минимум 0.800 mm)"
         );
+    }
+}
+
+/// Ray-casting point-in-contour test.
+///
+/// Used to decide whether a region sits inside another region's hole, which is
+/// the only situation that requires a bridge (see `unanchored_islands`).
+#[must_use]
+pub fn point_in_contour(point: Point, contour: &Contour) -> bool {
+    let pts = &contour.points;
+    if pts.len() < 3 {
+        return false;
+    }
+
+    // Boundary is treated as inside. The ray test below cannot express this
+    // reliably — it is asymmetric between the left and right edge — so the
+    // boundary is decided explicitly first.
+    let segments = if contour.closed {
+        pts.len()
+    } else {
+        pts.len() - 1
+    };
+    for i in 0..segments {
+        let a = pts[i];
+        let b = pts[(i + 1) % pts.len()];
+        if point_on_segment(point, a, b, crate::constants::GEOM_EPS_MM) {
+            return true;
+        }
+    }
+
+    let mut inside = false;
+    let mut j = pts.len() - 1;
+    for i in 0..pts.len() {
+        let (pi, pj) = (pts[i], pts[j]);
+        if (pi.y > point.y) != (pj.y > point.y) {
+            let t = (point.y - pi.y) / (pj.y - pi.y);
+            if point.x < pi.x + t * (pj.x - pi.x) {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Whether `p` lies on segment `a..b` within `tolerance`.
+#[must_use]
+pub fn point_on_segment(p: Point, a: Point, b: Point, tolerance: f64) -> bool {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length_sq = dx * dx + dy * dy;
+    if length_sq <= tolerance * tolerance {
+        return p.distance_to(a) <= tolerance;
+    }
+    // Project and clamp to the segment.
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / length_sq).clamp(0.0, 1.0);
+    let projected = Point {
+        x: a.x + t * dx,
+        y: a.y + t * dy,
+    };
+    p.distance_to(projected) <= tolerance
+}
+
+/// Regions that sit inside a hole of another region and therefore cannot be
+/// applied as a separate piece.
+///
+/// Disjoint regions are *not* islands: a mask layer cut from one sheet yields
+/// separate pieces of film, and each is applied on its own, so no bridge is
+/// needed. A region inside a hole is different — the outer piece is laid down
+/// and painted while the inner piece is still nested in it, so the inner piece
+/// must be held by a bridge or it drops out.
+///
+/// Returns the indices of the islands, in input order.
+#[must_use]
+pub fn unanchored_islands(shapes: &Shapes) -> Vec<usize> {
+    let mut islands = Vec::new();
+
+    for (i, candidate) in shapes.shapes.iter().enumerate() {
+        // Sample the candidate rather than testing one arbitrary vertex: a
+        // region straddling a hole boundary is partly unanchored either way.
+        let probes = sample_points(candidate, 8);
+        for other in shapes.shapes.iter() {
+            if other.outer.points == candidate.outer.points {
+                continue;
+            }
+            for hole in &other.holes {
+                if probes.iter().any(|p| point_in_contour(*p, hole)) {
+                    islands.push(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    islands.sort_unstable();
+    islands.dedup();
+    islands
+}
+
+/// A few interior points of a region, used for containment probing.
+fn sample_points(shape: &Shape, count: usize) -> Vec<Point> {
+    let (_, _, w, h) = crate::measure::shape_bounds(shape);
+    if w <= 0.0 || h <= 0.0 {
+        return Vec::new();
+    }
+    let (min_x, min_y, _, _) = crate::measure::shape_bounds(shape);
+    let n = count as f64;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        // Spread probes over a coprime stride so they do not land on a grid.
+        let fx = ((i as f64) + 0.5) / n;
+        let fy = (((i * 3) % count) as f64 + 0.5) / n;
+        out.push(Point {
+            x: min_x + fx * w,
+            y: min_y + fy * h,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod island_tests {
+    use super::*;
+
+    fn p(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
+    fn ring(x: f64, y: f64, w: f64, h: f64) -> Contour {
+        Contour {
+            points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
+            closed: true,
+        }
+    }
+
+    #[test]
+    fn point_inside_a_ring_is_detected() {
+        assert!(point_in_contour(p(5.0, 5.0), &ring(0.0, 0.0, 10.0, 10.0)));
+        assert!(!point_in_contour(p(15.0, 5.0), &ring(0.0, 0.0, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn a_point_exactly_on_the_boundary_counts_as_inside() {
+        // Deliberate, and asymmetric on purpose. A point on the edge is
+        // ambiguous for ray casting, and the two ways to resolve it are not
+        // equivalent in cost:
+        //
+        //   inside  -> an extra bridge is suggested. Cost: a little material.
+        //   outside -> a real island goes unnoticed, it falls off during peel,
+        //              and it takes the paint with it.
+        //
+        // For a safety rule the cheap false positive is the correct bias.
+        assert!(point_in_contour(p(0.0, 5.0), &ring(0.0, 0.0, 10.0, 10.0)));
+        assert!(point_in_contour(p(10.0, 5.0), &ring(0.0, 0.0, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn a_region_inside_a_hole_is_an_unanchored_island() {
+        let outer = Shape::with_holes(ring(0.0, 0.0, 20.0, 20.0), vec![ring(5.0, 5.0, 10.0, 10.0)]);
+        let inner = Shape::new(ring(8.0, 8.0, 4.0, 4.0));
+        let shapes = Shapes {
+            shapes: vec![outer, inner],
+        };
+        assert_eq!(unanchored_islands(&shapes), vec![1]);
+    }
+
+    #[test]
+    fn disjoint_regions_need_no_bridges() {
+        // Two separate pieces of film are applied one after another, so no
+        // bridge is required and reporting one would be a false positive.
+        let shapes = Shapes {
+            shapes: vec![
+                Shape::new(ring(0.0, 0.0, 5.0, 5.0)),
+                Shape::new(ring(50.0, 0.0, 5.0, 5.0)),
+            ],
+        };
+        assert!(unanchored_islands(&shapes).is_empty());
+    }
+
+    #[test]
+    fn a_bridged_island_leaves_no_hole_and_is_clean() {
+        // Union of the ring, its hole and the inner patch removes the hole, so
+        // the island disappears. This is why the CLI unions per layer.
+        let mut shapes = Shapes {
+            shapes: vec![Shape::with_holes(
+                ring(0.0, 0.0, 20.0, 20.0),
+                vec![ring(5.0, 5.0, 10.0, 10.0)],
+            )],
+        };
+        shapes = crate::boolean::union(
+            &shapes,
+            &Shapes {
+                shapes: vec![Shape::new(ring(8.0, 8.0, 4.0, 4.0))],
+            },
+        )
+        .unwrap();
+        // With the patch present there is no hole, hence no island.
+        assert!(
+            shapes.shapes[0].holes.is_empty(),
+            "union should close the hole"
+        );
+        assert!(unanchored_islands(&shapes).is_empty());
     }
 }

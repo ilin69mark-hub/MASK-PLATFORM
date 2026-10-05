@@ -24,6 +24,7 @@ pub use constants::{
 pub use geom::{Contour, GeometryError, Point, Shape, Shapes};
 pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
 pub use measure::{
-    bounding_box, contour_perimeter, meets_threshold, shape_area, shapes_area, signed_contour_area,
+    bounding_box, contour_perimeter, meets_threshold, point_in_contour, shape_area, shape_bounds,
+    shapes_area, signed_contour_area, unanchored_islands,
 };
 pub use offset::{lib_math_mode, min_width, offset_shape, survives_inward_offset, widen};

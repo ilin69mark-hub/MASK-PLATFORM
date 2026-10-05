@@ -1,0 +1,58 @@
+{
+  "project_id": "MASK-T004",
+  "revision": 1,
+  "_comment": "TEST 4. The same ring and the same patch, with the bridge removed. Expected: FAIL on island_anchored. Cut it anyway. If the patch stays on the part, the island rule is over-strict and the island minimum can go below 0.80 mm. If it lifts or drops, the rule is right and the failure is the useful result.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Unbridged Island",
+      "width_mm": 1.5,
+      "centrelines": [
+        [
+          [
+            20,
+            20
+          ],
+          [
+            140,
+            20
+          ],
+          [
+            140,
+            140
+          ],
+          [
+            20,
+            140
+          ],
+          [
+            20,
+            20
+          ]
+        ],
+        [
+          [
+            78,
+            78
+          ],
+          [
+            84,
+            78
+          ],
+          [
+            84,
+            84
+          ],
+          [
+            78,
+            84
+          ],
+          [
+            78,
+            78
+          ]
+        ]
+      ]
+    }
+  ]
+}

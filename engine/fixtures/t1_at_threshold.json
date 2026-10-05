@@ -1,0 +1,64 @@
+{
+  "project_id": "MASK-T001",
+  "revision": 1,
+  "_comment": "TEST 1. Element exactly at the 0.80 mm minimum. Expected: PASS, and the cut element must survive being weeded, positioned and peeled. If this fails, the profile minimum is too optimistic and must be raised.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "At Threshold",
+      "width_mm": 0.8,
+      "centrelines": [
+        [
+          [
+            20,
+            20
+          ],
+          [
+            140,
+            20
+          ]
+        ],
+        [
+          [
+            20,
+            40
+          ],
+          [
+            140,
+            40
+          ]
+        ],
+        [
+          [
+            20,
+            60
+          ],
+          [
+            140,
+            60
+          ]
+        ],
+        [
+          [
+            20,
+            80
+          ],
+          [
+            140,
+            80
+          ]
+        ],
+        [
+          [
+            20,
+            100
+          ],
+          [
+            140,
+            100
+          ]
+        ]
+      ]
+    }
+  ]
+}

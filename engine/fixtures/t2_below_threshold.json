@@ -1,0 +1,58 @@
+{
+  "project_id": "MASK-T002",
+  "revision": 1,
+  "_comment": "TEST 2. Widths just below the 0.80 mm minimum: 0.60, 0.70, 0.75. Expected: FAIL from the validator. Then cut it anyway by hand, because the point is to observe WHAT HAPPENS. The profile claims these cannot be held; the physical run is what decides whether that claim is true.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "0.60 mm",
+      "width_mm": 0.6,
+      "centrelines": [
+        [
+          [
+            20,
+            20
+          ],
+          [
+            240,
+            20
+          ]
+        ]
+      ]
+    },
+    {
+      "index": 2,
+      "name": "0.70 mm",
+      "width_mm": 0.7,
+      "centrelines": [
+        [
+          [
+            20,
+            40
+          ],
+          [
+            240,
+            40
+          ]
+        ]
+      ]
+    },
+    {
+      "index": 3,
+      "name": "0.75 mm",
+      "width_mm": 0.75,
+      "centrelines": [
+        [
+          [
+            20,
+            60
+          ],
+          [
+            240,
+            60
+          ]
+        ]
+      ]
+    }
+  ]
+}

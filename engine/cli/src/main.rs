@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mask_export::{project_svgs, ArtifactContext};
-use mask_kernel::{widen, Point, Shape, Shapes};
+use mask_kernel::{union, widen, Point, Shapes};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
 use mask_validate::{render, validate, LayerInput};
@@ -113,9 +113,14 @@ fn load_fixture(path: &Path) -> Result<Fixture, String> {
 }
 
 /// Turn one fixture layer into geometry by stroking each centreline to its width.
+///
+/// Bands are unioned after stroking. Within a single mask layer every cut
+/// region comes from one sheet of film, so bands that touch are already one
+/// physical piece; leaving them as separate shapes would make a bridge
+/// impossible to represent, and the island check could never pass.
 fn build_layer(layer: &FixtureLayer, widen_to: Option<f64>) -> Result<LayerInput, String> {
     let width = widen_to.unwrap_or(layer.width_mm);
-    let mut shapes: Vec<Shape> = Vec::new();
+    let mut merged: Shapes = Shapes::new();
 
     for line in &layer.centrelines {
         if line.len() < 2 {
@@ -127,13 +132,14 @@ fn build_layer(layer: &FixtureLayer, widen_to: Option<f64>) -> Result<LayerInput
         let points: Vec<Point> = line.iter().map(|[x, y]| Point { x: *x, y: *y }).collect();
         let band = widen(&points, width)
             .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
-        shapes.extend(band.shapes);
+        merged = union(&merged, &band)
+            .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
     }
 
     Ok(LayerInput {
         index: layer.index,
         name: layer.name.clone(),
-        geometry: Shapes { shapes },
+        geometry: merged,
     })
 }
 
