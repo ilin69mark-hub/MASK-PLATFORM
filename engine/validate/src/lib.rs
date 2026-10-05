@@ -11,8 +11,8 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, meets_threshold, min_width, shapes_area, unanchored_islands, Contour, Point,
-    Shape, Shapes,
+    bounding_box, format_measurement, meets_threshold, min_gap, min_width, shapes_area,
+    unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,11 @@ pub struct LayerMetrics {
     pub bbox: [f64; 4],
     /// Narrowest measured element, when one could be measured.
     pub min_width_mm: Option<f64>,
+    /// Tightest gap between separate regions of this layer.
+    ///
+    /// `None` for a layer with fewer than two regions: one piece of film has no
+    /// neighbour, so there is no gap to report.
+    pub min_gap_mm: Option<f64>,
 }
 
 /// The result of one validation run.
@@ -264,6 +269,7 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
         area_mm2: shapes_area(&layer.geometry),
         bbox: [min_x, min_y, w, h],
         min_width_mm,
+        min_gap_mm: min_gap(&layer.geometry).map(|g| g.mm),
     }
 }
 
@@ -402,6 +408,60 @@ fn check_layer(
                         }],
                     });
                 }
+            }
+        }
+    }
+
+    // min_gap — two regions of one layer must not come closer than the material's
+    // minimum gap, or they merge while being weeded and the film between them
+    // takes the neighbouring piece with it.
+    //
+    // Reported per pair rather than as a layer total: "somewhere there is a gap of
+    // 0.4 mm" is not actionable, and the fix is always local.
+    if let Some(rule) = rules.rule("min_gap") {
+        let tight = min_gap(&layer.geometry);
+        if let Some(gap) = tight {
+            if !meets_threshold(gap.mm, limits.gap_mm) {
+                violations.push(Violation {
+                    code: rule.code.clone(),
+                    severity: rule.severity,
+                    layer_index: Some(layer.index),
+                    measured: Some(gap.mm),
+                    required: Some(limits.gap_mm),
+                    count: 1,
+                    // format_measurement already carries both numbers and the
+                    // word «минимум», so appending it again produced
+                    // "0.400 mm (минимум 0.900 mm) мм".
+                    headline: format!(
+                        "Слой {} «{}»: элементы {} и {} разошлись на {}.",
+                        layer.index,
+                        layer.name,
+                        gap.a + 1,
+                        gap.b + 1,
+                        format_measurement(gap.mm, limits.gap_mm)
+                    ),
+                    reason: rule.reason.to_string(),
+                    actions: vec![
+                        Action {
+                            id: "widen_gap".into(),
+                            label: "Увеличить зазор".into(),
+                            primary: true,
+                            estimated_fidelity_loss: Some(0.01),
+                        },
+                        Action {
+                            id: "merge_elements".into(),
+                            label: "Объединить элементы".into(),
+                            primary: false,
+                            estimated_fidelity_loss: Some(0.02),
+                        },
+                        Action {
+                            id: "show_elements".into(),
+                            label: "Показать элементы".into(),
+                            primary: false,
+                            estimated_fidelity_loss: None,
+                        },
+                    ],
+                });
             }
         }
     }
@@ -685,6 +745,126 @@ mod tests {
             !text.contains("ERROR"),
             "no error codes in user-facing text: {text}"
         );
+    }
+
+    /// A layer of separate rectangles at a chosen spacing, so the gap between
+    /// neighbours is exactly the spacing.
+    fn bars_layer(index: u32, spacing: f64) -> LayerInput {
+        let shapes: Vec<Shape> = (0..3)
+            .map(|i| {
+                let x = i as f64 * (10.0 + spacing);
+                Shape::new(Contour {
+                    points: vec![
+                        Point { x, y: 0.0 },
+                        Point {
+                            x: x + 10.0,
+                            y: 0.0,
+                        },
+                        Point {
+                            x: x + 10.0,
+                            y: 5.0,
+                        },
+                        Point { x, y: 5.0 },
+                    ],
+                    closed: true,
+                })
+            })
+            .collect();
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes { shapes },
+        }
+    }
+
+    #[test]
+    fn a_gap_at_the_threshold_passes_the_gap_rule() {
+        // The material's minimum gap is 0.90 mm.
+        let report = run(vec![bars_layer(1, 0.90)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "min_gap"),
+            "a 0.90 mm gap must satisfy a 0.90 mm minimum: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn a_gap_below_the_threshold_fails() {
+        let report = run(vec![bars_layer(1, 0.40)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_gap")
+            .expect("a 0.40 mm gap must violate a 0.90 mm minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert!(matches!(report.verdict, Verdict::Fail));
+        assert!(
+            (v.measured.expect("measured") - 0.40).abs() < 1e-3,
+            "should measure 0.40 mm, got {:?}",
+            v.measured
+        );
+    }
+
+    #[test]
+    fn a_tight_gap_names_the_two_offending_elements() {
+        let report = run(vec![bars_layer(1, 0.40)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_gap")
+            .expect("violation");
+        // Elements are numbered from 1 for the operator, not from 0.
+        assert!(
+            v.headline.contains('1') && v.headline.contains('2'),
+            "{}",
+            v.headline
+        );
+        assert!(v.actions.iter().any(|a| a.id == "widen_gap"));
+    }
+
+    #[test]
+    fn the_gap_metric_is_reported_per_layer() {
+        let report = run(vec![bars_layer(1, 0.40)]);
+        let metrics = &report.layers[0];
+        assert!(
+            (metrics.min_gap_mm.expect("a gap") - 0.40).abs() < 1e-3,
+            "got {:?}",
+            metrics.min_gap_mm
+        );
+    }
+
+    #[test]
+    fn a_layer_of_one_region_reports_no_gap_at_all() {
+        // One piece of film has no neighbour, so a gap number would be invented.
+        let report = run(vec![band_layer(1, 0.80, 200.0)]);
+        assert_eq!(report.layers[0].min_gap_mm, None);
+        assert!(!report.violations.iter().any(|v| v.code == "min_gap"));
+    }
+
+    #[test]
+    fn touching_regions_are_a_zero_gap_not_a_pass() {
+        // Bars that share an edge: weeding merges them, so this must fail.
+        let mut layer = bars_layer(1, 0.40);
+        // Slide the second and third bars left until each sits flush against its
+        // neighbour: 10.40 -> 10.00.
+        let offset = -0.40;
+        layer.geometry.shapes[1]
+            .outer
+            .points
+            .iter_mut()
+            .for_each(|p| p.x += offset);
+        layer.geometry.shapes[2]
+            .outer
+            .points
+            .iter_mut()
+            .for_each(|p| p.x += offset);
+        let report = run(vec![layer]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_gap")
+            .expect("touching film merges during weeding");
+        assert!(v.measured.expect("measured") < 1e-6, "got {:?}", v.measured);
     }
 
     #[test]

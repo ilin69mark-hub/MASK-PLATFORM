@@ -608,8 +608,13 @@ fn run(args: &Args) -> Result<bool, String> {
         let width = m
             .min_width_mm
             .map_or("—".to_string(), |v| format!("{:.3} mm", v));
+        // An em dash for a single-region layer: one piece of film has no
+        // neighbour, so there is no gap to report and a number would be invented.
+        let gap = m
+            .min_gap_mm
+            .map_or("—".to_string(), |v| format!("{v:.3} mm"));
         println!(
-            "  L{:02} {:<18} regions {:<3} area {:>12.1} mm²  bbox {:>7.1}×{:<7.1} mm  min width {width}",
+            "  L{:02} {:<18} regions {:<3} area {:>12.1} mm²  bbox {:>7.1}×{:<7.1} mm  min width {width}  min gap {gap}",
             m.index, m.name, m.paths, m.area_mm2, m.bbox[2], m.bbox[3]
         );
     }

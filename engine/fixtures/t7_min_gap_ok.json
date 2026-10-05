@@ -1,0 +1,43 @@
+{
+  "project_id": "MASK-GAP-002",
+  "revision": 1,
+  "target": {
+    "object": "Gap probe",
+    "part": "Flat",
+    "part_code": "GAP",
+    "dimensions_mm": [
+      60.0,
+      40.0
+    ]
+  },
+  "_comment": "TEST G2. Two bars 1.10 mm apart, above the 0.90 mm minimum gap. Expected: PASS on min_gap.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Enough Room",
+      "width_mm": 1.0,
+      "centrelines": [
+        [
+          [
+            2,
+            10
+          ],
+          [
+            12,
+            10
+          ]
+        ],
+        [
+          [
+            13.1,
+            10
+          ],
+          [
+            23,
+            10
+          ]
+        ]
+      ]
+    }
+  ]
+}
