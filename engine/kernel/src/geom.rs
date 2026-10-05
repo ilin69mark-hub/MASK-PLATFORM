@@ -24,6 +24,9 @@ pub enum GeometryError {
 
     #[error("invalid fill rule: {0}")]
     InvalidFillRule(String),
+
+    #[error("hole {index} winds the same way as its outer contour; holes must be clockwise")]
+    HoleOrientation { index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -154,6 +157,38 @@ impl Shape {
         }
         Ok(())
     }
+
+    /// Check that holes wind opposite to the outer contour.
+    ///
+    /// Signed area is the whole basis of subtraction: outer counter-clockwise is
+    /// positive, holes clockwise are negative, and summing them removes the hole.
+    /// A hole wound the same way adds instead, so a shape with one such hole
+    /// reports the wrong area while looking perfectly well formed.
+    ///
+    /// This was found by a test in the web facade, not by the kernel: a hand-built
+    /// shape whose hole shared the outer's winding returned 500 mm² for a figure
+    /// whose true area is 300 mm². Nothing complained, because a wrong area is
+    /// exactly the kind of error that hides — it flows into fidelity, into
+    /// material estimates and into a manifest that then records the wrong number.
+    pub fn validate_orientation(&self) -> Result<(), GeometryError> {
+        let outer_area = crate::measure::signed_contour_area(&self.outer);
+        if outer_area.abs() <= crate::constants::GEOM_EPS_MM {
+            // Degenerate outer contour: orientation carries no information.
+            return Ok(());
+        }
+        let outer_is_ccw = outer_area > 0.0;
+
+        for (index, hole) in self.holes.iter().enumerate() {
+            let hole_area = crate::measure::signed_contour_area(hole);
+            if hole_area.abs() <= crate::constants::GEOM_EPS_MM {
+                continue;
+            }
+            if (hole_area > 0.0) == outer_is_ccw {
+                return Err(GeometryError::HoleOrientation { index });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A set of disjoint shapes, i.e. the operand or result of a boolean operation.
@@ -196,6 +231,15 @@ impl Shapes {
         }
         Ok(())
     }
+
+    /// Validate structure and hole orientation for every region.
+    pub fn validate_strict(&self, limit: f64) -> Result<(), GeometryError> {
+        self.validate(limit)?;
+        for shape in &self.shapes {
+            shape.validate_orientation()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +276,73 @@ mod tests {
             c.validate(LIMIT),
             Err(GeometryError::TooFewPoints { min: 3 })
         );
+    }
+
+    #[test]
+    fn a_hole_wound_the_same_way_as_the_outer_contour_is_rejected() {
+        // Both rings counter-clockwise, so the hole would add instead of subtract:
+        // a 20x20 outer with a 10x10 hole reports 500 mm² instead of 300 mm².
+        let ccw = |x: f64, y: f64, w: f64, h: f64| Contour {
+            points: vec![
+                Point { x, y },
+                Point { x: x + w, y },
+                Point { x: x + w, y: y + h },
+                Point { x, y: y + h },
+            ],
+            closed: true,
+        };
+        let bad = Shape::with_holes(ccw(0.0, 0.0, 20.0, 20.0), vec![ccw(5.0, 5.0, 10.0, 10.0)]);
+        assert_eq!(
+            bad.validate_orientation(),
+            Err(GeometryError::HoleOrientation { index: 0 })
+        );
+        // The lenient check passes it, which is why strict validation exists.
+        assert!(bad.validate(1e6).is_ok());
+    }
+
+    #[test]
+    fn a_correctly_wound_hole_passes() {
+        let ccw = |x: f64, y: f64, w: f64, h: f64| Contour {
+            points: vec![
+                Point { x, y },
+                Point { x: x + w, y },
+                Point { x: x + w, y: y + h },
+                Point { x, y: y + h },
+            ],
+            closed: true,
+        };
+        let cw = |x: f64, y: f64, w: f64, h: f64| Contour {
+            points: vec![
+                Point { x, y },
+                Point { x, y: y + h },
+                Point { x: x + w, y: y + h },
+                Point { x: x + w, y },
+            ],
+            closed: true,
+        };
+        let good = Shape::with_holes(ccw(0.0, 0.0, 20.0, 20.0), vec![cw(5.0, 5.0, 10.0, 10.0)]);
+        assert!(good.validate_orientation().is_ok());
+    }
+
+    #[test]
+    fn a_degenerate_outer_contour_does_not_fail_orientation() {
+        let triangle = Shape::with_holes(
+            Contour {
+                points: vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.0, y: 0.0 }],
+                closed: true,
+            },
+            vec![Contour {
+                points: vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 1.0, y: 0.0 },
+                    Point { x: 1.0, y: 1.0 },
+                ],
+                closed: true,
+            }],
+        );
+        // Orientation carries no information for a zero-area outer, so this must
+        // not be reported as a mis-wound hole.
+        assert!(triangle.validate_orientation().is_ok());
     }
 
     #[test]

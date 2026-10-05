@@ -1,0 +1,29 @@
+{
+  "name": "mask-platform-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mask Platform web client and Mask Studio.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/",
+    "kernel:dist": "wasm-pack build --target web --release --out-dir ../web/public/pkg",
+    "kernel:check": "node scripts/kernel-contract-check.mjs"
+  },
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.6.0",
+    "wasm-pack": "^0.15.0"
+  }
+}

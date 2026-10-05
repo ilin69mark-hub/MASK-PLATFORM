@@ -42,9 +42,24 @@ fmt: ## Format
 wasm: ## Verify the kernel builds for the browser
 	cd $(ENGINE) && $(CARGO) build -p mask-wasm --target wasm32-unknown-unknown
 
+web-install: ## Install web dependencies
+	cd $(ROOT)/web && npm install
+
+web-typecheck: web-install ## Typecheck the web client
+	cd $(ROOT)/web && npx tsc --noEmit
+
+web-build: web-install wasm-dist ## Build the web client
+	cd $(ROOT)/web && npm run build
+
+web-contract: wasm-runtime ## Check the TS facade against the real kernel
+	cd $(ROOT)/web && node scripts/kernel-contract-check.mjs
+
+web-test: ## Run the facade tests against the real wasm artifact
+	cd $(ROOT)/web && node --experimental-strip-types --test tests/kernel.test.ts
+
 .PHONY: wasm-dist
-wasm-dist: ## Build the loadable browser bundle
-	cd $(ENGINE)/wasm && wasm-pack build --target web --release --out-dir pkg
+wasm-dist: ## Build the browser bundle into web/public/pkg
+	cd $(ENGINE)/wasm && wasm-pack build --target web --release --out-dir $(ROOT)/web/public/pkg
 
 .PHONY: wasm-runtime
 wasm-runtime: ## Run the built kernel in a real JS runtime and compare with Rust
@@ -93,4 +108,4 @@ wasm-check: ## Re-run the ADR-0003 wasm verification
 	cd $(SPIKE) && ./wasm_check.sh
 
 .PHONY: check
-check: lint test schema schema-check wasm wasm-runtime ## Everything CI should run
+check: lint test schema schema-check wasm wasm-runtime web-contract web-test web-typecheck ## Everything CI should run

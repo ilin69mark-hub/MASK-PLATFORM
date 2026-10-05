@@ -53,7 +53,11 @@ pub struct JsShape {
 pub struct LayerResult {
     pub area_mm2: f64,
     pub min_width_mm: Option<f64>,
-    pub min_gap_mm: Option<f64>,
+    // No min_gap_mm: the gap between adjacent elements is not measured yet
+    // (Topology check T-02). An Option that is always None is dropped by serde and
+    // arrives in JavaScript as `undefined`, so shipping it would teach the UI to
+    // handle a case that never happens while hiding the fact that the check is
+    // missing. It is added when it is implemented.
     pub island_count: usize,
     pub hole_count: usize,
     pub bbox: [f64; 4],
@@ -144,7 +148,7 @@ pub fn measure_layer(shapes_json: &str) -> Result<JsValue, JsValue> {
 fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
     let shapes: Shapes = parse(shapes_json, "shapes")?;
     shapes
-        .validate(mask_kernel::MAX_COORDINATE_MM)
+        .validate_strict(mask_kernel::MAX_COORDINATE_MM)
         .map_err(|e| JsError::new(e.to_string()))?;
 
     let (_, _, w, h) = mask_kernel::bounding_box(&shapes);
@@ -165,7 +169,6 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
     Ok(LayerResult {
         area_mm2: measure::shapes_area(&shapes),
         min_width_mm,
-        min_gap_mm: None,
         island_count: shapes.shapes.len(),
         hole_count: shapes.shapes.iter().map(|s| s.holes.len()).sum(),
         bbox: [0.0, 0.0, w, h],
@@ -199,6 +202,23 @@ fn widen_centreline_inner(points_json: &str, target_width_mm: f64) -> Result<Lay
     let band =
         mask_kernel::widen(&points, target_width_mm).map_err(|e| JsError::new(e.to_string()))?;
     measure_layer_inner(&to_string(&band)?)
+}
+
+/// Union of two shape sets.
+///
+/// Present because the editor builds a layer by stroking several centrelines and
+/// then merging them. Doing that merge in TypeScript would be an approximation,
+/// and an approximation in a preview is a lie the user cannot see.
+#[wasm_bindgen]
+pub fn union(a_json: &str, b_json: &str) -> Result<JsValue, JsValue> {
+    let a: Shapes = parse(a_json, "shapes").map_err(into_js)?;
+    let b: Shapes = parse(b_json, "shapes").map_err(into_js)?;
+    a.validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| into_js(JsError::new(e.to_string())))?;
+    b.validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| into_js(JsError::new(e.to_string())))?;
+    let merged = mask_kernel::union(&a, &b).map_err(|e| JsError::new(e.to_string()))?;
+    to_js(&merged)
 }
 
 /// Canonical content hash of a shape set, for change detection in the editor.
