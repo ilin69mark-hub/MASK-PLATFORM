@@ -9,6 +9,7 @@
 //! iteration order, fixed decimal precision.
 
 use mask_kernel::{Shape, Shapes, CANON_COORD_DP};
+use mask_nesting::RegistrationMarks;
 use mask_validate::{ValidationReport, Verdict};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +21,14 @@ pub enum ExportError {
     EmptyLayer { index: u32 },
 }
 
+/// Registration marks to draw alongside a tile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarksToDraw {
+    pub marks: RegistrationMarks,
+    /// Tile outline so the worker can see the printable area.
+    pub rect: [f64; 4],
+}
+
 /// Identity written into every artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactContext {
@@ -27,6 +36,29 @@ pub struct ArtifactContext {
     pub revision: u32,
     pub engine_version: String,
     pub kerf_mm: f64,
+}
+
+/// The window an SVG shows, in millimetres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl View {
+    /// Default view: exactly the geometry's bounding box.
+    #[must_use]
+    pub fn of(geometry: &Shapes) -> Self {
+        let (min_x, min_y, w, h) = mask_kernel::bounding_box(geometry);
+        Self {
+            min_x,
+            min_y,
+            width: w,
+            height: h,
+        }
+    }
 }
 
 /// Write one layer as an SVG in millimetres.
@@ -41,27 +73,52 @@ pub fn to_svg(
     report: &ValidationReport,
     ctx: &ArtifactContext,
 ) -> String {
-    let (min_x, min_y, w, h) = mask_kernel::bounding_box(geometry);
+    to_svg_with_view(
+        geometry,
+        View::of(geometry),
+        layer_index,
+        layer_name,
+        report,
+        ctx,
+    )
+}
+
+/// Write one layer as an SVG showing an explicit window.
+///
+/// A tile needs this: its registration marks and printable-area outline live
+/// outside the cut geometry, so a view derived from the content alone would
+/// clip them away and leave the worker with nothing to align against.
+#[must_use]
+pub fn to_svg_with_view(
+    geometry: &Shapes,
+    view: View,
+    layer_index: u32,
+    layer_name: &str,
+    report: &ValidationReport,
+    ctx: &ArtifactContext,
+) -> String {
     let kerf = ctx.kerf_mm;
-
-    // Header numbers go through the same quantisation as path data. Printing
-    // raw f64 here produced `150.84999990463257mm`, which is deterministic but
-    // is not the canonical form ADR-0004 requires, and it contradicted the
-    // 4-decimal path data in the same file.
-    let num = |v: f64| format!("{v:.prec$}", prec = CANON_COORD_DP);
-    let header = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\"\n     version=\"1.1\"\n     width=\"{}mm\" height=\"{}mm\"\n     viewBox=\"{} {} {} {}\">\n",
-        num(w),
-        num(h),
-        num(min_x),
-        num(min_y),
-        num(w),
-        num(h)
-    );
-
     let mut s = String::with_capacity(4096 + geometry.shapes.len() * 256);
+
+    // Header numbers go through the same quantisation as path data. Printing raw
+    // f64 here produced `150.84999990463257mm`, which is deterministic but is not
+    // the canonical form ADR-0004 requires, and it contradicted the 4-decimal
+    // path data in the same file.
     s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    s.push_str(&header);
+    s.push_str(&format!(
+        concat!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"\n",
+            "     version=\"1.1\"\n",
+            "     width=\"{}mm\" height=\"{}mm\"\n",
+            "     viewBox=\"{} {} {} {}\">\n"
+        ),
+        num(view.width),
+        num(view.height),
+        num(view.min_x),
+        num(view.min_y),
+        num(view.width),
+        num(view.height),
+    ));
 
     // Metadata travels with the file. A mask found on a bench years later must
     // be identifiable without the database.
@@ -135,6 +192,98 @@ pub fn project_svgs(
     Ok(out)
 }
 
+/// Write one tile of a nested layer, with its registration marks.
+///
+/// The marks are what make reassembly possible. A tile file without them is not
+/// a cuttable artifact: the worker would have no way to align the piece with the
+/// part, or with its neighbour, and would be guessing.
+#[must_use]
+pub fn tile_to_svg(
+    geometry: &Shapes,
+    layer_index: u32,
+    layer_name: &str,
+    tile_id: &str,
+    tile: &MarksToDraw,
+    report: &ValidationReport,
+    ctx: &ArtifactContext,
+) -> String {
+    // The view must cover the whole tile, not just the cut geometry: the marks
+    // and the printable-area outline sit in the margin, and clipping them away
+    // would leave the worker with no alignment reference at all.
+    let [rx, ry, rw, rh] = tile.rect;
+    let view = View {
+        min_x: rx,
+        min_y: ry,
+        width: rw.max(0.001),
+        height: rh.max(0.001),
+    };
+    let mut svg = to_svg_with_view(geometry, view, layer_index, layer_name, report, ctx);
+
+    let mut body = String::from(
+        "\n  <g id=\"registration\" fill=\"none\" stroke=\"#000000\" stroke-width=\"0.1\">\n",
+    );
+
+    let cross = |x: f64, y: f64| {
+        format!(
+            concat!("    <path d=\"M {x0} {y0} L {x0} {y1} M {x1} {y0} L {x0} {y0}\"/>\n"),
+            x0 = num(x),
+            y0 = num(y),
+            x1 = num(x + 3.0),
+            y1 = num(y + 3.0),
+        )
+    };
+
+    let pa = &tile.marks.part_anchor;
+    let ta = &tile.marks.tile_anchor;
+    body.push_str(&cross(pa.left.x_mm, pa.left.y_mm));
+    body.push_str(&cross(pa.right.x_mm, pa.right.y_mm));
+    body.push_str(&cross(ta.left.x_mm, ta.left.y_mm));
+    body.push_str(&cross(ta.right.x_mm, ta.right.y_mm));
+
+    let [rx, ry, rw, rh] = tile.rect;
+    body.push_str(&format!(
+        "    <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" stroke-dasharray=\"4 2\"/>\n",
+        num(rx),
+        num(ry),
+        num(rw),
+        num(rh)
+    ));
+
+    // Printed large: the label is read by eye at the bench, not zoomed.
+    body.push_str(&format!(
+        "    <text x=\"{}\" y=\"{}\" fill=\"#000000\" stroke=\"none\" font-size=\"8\">{tile_id}</text>\n",
+        num(rx + rw / 2.0),
+        num(ry + rh - 4.0)
+    ));
+
+    if tile.marks.orientation {
+        let ax = rx + rw / 2.0;
+        let ay = ry + 4.0;
+        body.push_str(&format!(
+            "    <path d=\"M {} {} L {} {} M {} {} L {} {}\"/>\n",
+            num(ax),
+            num(ay + 6.0),
+            num(ax),
+            num(ay),
+            num(ax + 2.5),
+            num(ay + 2.5),
+            num(ax),
+            num(ay)
+        ));
+    }
+
+    body.push_str("  </g>\n</svg>\n");
+
+    svg.truncate(svg.len() - "</svg>\n".len());
+    svg.push_str(&body);
+    svg
+}
+
+/// Format a coordinate at the canonical precision.
+fn num(value: f64) -> String {
+    format!("{value:.prec$}", prec = CANON_COORD_DP)
+}
+
 /// File name for a layer artifact.
 ///
 /// Encodes project, revision and layer so a directory of masks is
@@ -171,6 +320,21 @@ fn numeric_literals(text: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// File name for one tile of a nested layer.
+///
+/// A tile file names both the layer and the tile, because a bench worker
+/// receives sheets and needs to know which piece of which layer they hold.
+#[must_use]
+pub fn tile_artifact_name(
+    project_id: &str,
+    revision: u32,
+    layer_index: u32,
+    tile_id: &str,
+    extension: &str,
+) -> String {
+    format!("{project_id}_rev{revision}_L{layer_index:02}_{tile_id}.{extension}")
 }
 
 /// Decimal places used for coordinates, exposed for tests.
@@ -365,5 +529,136 @@ mod tests {
         assert!(svg.starts_with("<?xml"));
         assert!(svg.trim_end().ends_with("</svg>"));
         assert_eq!(svg.matches('<').count(), svg.matches('>').count());
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+    use mask_kernel::{Contour, Point};
+    use mask_nesting::{MarkPoint, MarkPoints, RegistrationMarks};
+
+    fn marks() -> RegistrationMarks {
+        RegistrationMarks {
+            part_anchor: MarkPoints {
+                left: MarkPoint {
+                    x_mm: 10.0,
+                    y_mm: 50.0,
+                },
+                right: MarkPoint {
+                    x_mm: 270.0,
+                    y_mm: 50.0,
+                },
+            },
+            tile_anchor: MarkPoints {
+                left: MarkPoint {
+                    x_mm: 140.0,
+                    y_mm: 10.0,
+                },
+                right: MarkPoint {
+                    x_mm: 140.0,
+                    y_mm: 90.0,
+                },
+            },
+            orientation: true,
+            label: "A2".into(),
+        }
+    }
+
+    fn tile() -> MarksToDraw {
+        MarksToDraw {
+            marks: marks(),
+            rect: [0.0, 0.0, 284.0, 100.0],
+        }
+    }
+
+    fn ctx() -> ArtifactContext {
+        ArtifactContext {
+            project_id: "MASK-000127".into(),
+            revision: 2,
+            engine_version: "maskctl/0.1.0".into(),
+            kerf_mm: 0.15,
+        }
+    }
+
+    fn report() -> ValidationReport {
+        ValidationReport {
+            verdict: Verdict::Pass,
+            counts: mask_validate::Counts {
+                fatal: 0,
+                error: 0,
+                warning: 0,
+                info: 0,
+            },
+            violations: vec![],
+            layers: vec![],
+            fidelity: Some(0.9),
+            limits_physically_verified: false,
+        }
+    }
+
+    fn content() -> Shapes {
+        Shapes::single(Shape::new(Contour {
+            points: vec![
+                Point { x: 40.0, y: 30.0 },
+                Point { x: 240.0, y: 30.0 },
+                Point { x: 240.0, y: 70.0 },
+                Point { x: 40.0, y: 70.0 },
+            ],
+            closed: true,
+        }))
+    }
+
+    #[test]
+    fn a_tile_shows_the_whole_tile_not_just_the_cut() {
+        // Regression: the view was derived from the content bounding box, which
+        // clipped the marks and the printable-area outline away. The worker
+        // would have had nothing to align against.
+        let svg = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        assert!(
+            svg.contains("viewBox=\"0.0000 0.0000 284.0000 100.0000\""),
+            "{svg}"
+        );
+        assert!(svg.contains("width=\"284.0000mm\""));
+    }
+
+    #[test]
+    fn a_tile_carries_all_four_registration_crosses() {
+        let svg = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        let crosses = svg.matches("<path d=\"M 10.0000").count()
+            + svg.matches("<path d=\"M 270.0000").count()
+            + svg.matches("<path d=\"M 140.0000 10.0000").count()
+            + svg.matches("<path d=\"M 140.0000 90.0000").count();
+        assert_eq!(crosses, 4, "part anchor pair plus tile anchor pair");
+    }
+
+    #[test]
+    fn a_tile_is_labelled_with_its_own_id() {
+        let svg = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        assert!(svg.contains(">A2</text>"), "tile label missing: {svg}");
+    }
+
+    #[test]
+    fn the_printable_area_is_outlined() {
+        let svg = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        assert!(
+            svg.contains("stroke-dasharray=\"4 2\""),
+            "tile outline missing"
+        );
+    }
+
+    #[test]
+    fn tile_export_is_deterministic() {
+        let a = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        let b = tile_to_svg(&content(), 1, "Base", "A2", &tile(), &report(), &ctx());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_tile_file_names_the_layer_and_the_tile() {
+        assert_eq!(
+            tile_artifact_name("MASK-000127", 2, 1, "A2", "svg"),
+            "MASK-000127_rev2_L01_A2.svg"
+        );
     }
 }

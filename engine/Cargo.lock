@@ -122,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "mask-export",
  "mask-kernel",
+ "mask-nesting",
  "mask-profiles",
  "mask-rules",
  "mask-validate",
@@ -134,6 +135,7 @@ name = "mask-export"
 version = "0.1.0"
 dependencies = [
  "mask-kernel",
+ "mask-nesting",
  "mask-validate",
  "thiserror",
 ]
@@ -146,6 +148,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "mask-nesting"
+version = "0.1.0"
+dependencies = [
+ "mask-kernel",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

@@ -16,6 +16,7 @@ use mask_kernel::{
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
@@ -143,12 +144,40 @@ pub struct LayerInput {
 /// Validate a project against a rule set.
 ///
 /// Never panics: every problem becomes a violation.
+/// Validate a project that has not been nested.
 #[must_use]
 pub fn validate(
     layers: &[LayerInput],
     profile: &CuttingProfile,
     rules: &RuleSet,
     limits_physically_verified: bool,
+) -> ValidationReport {
+    validate_with_nesting(
+        layers,
+        profile,
+        rules,
+        limits_physically_verified,
+        &BTreeMap::new(),
+    )
+}
+
+/// Validate a project, taking any nesting plan into account.
+///
+/// `nested_tiles` maps a layer index to the bounding boxes of its tiles. The
+/// validator deliberately takes plain rectangles rather than a nesting plan,
+/// so this crate stays independent of the nesting implementation: what it needs
+/// to know is the size of each printable piece, nothing more.
+///
+/// Width, gap and island rules are still measured on the *whole* layer. Splitting
+/// a mask into tiles does not make an element wider, and measuring per tile would
+/// hide an element that straddles a cut.
+#[must_use]
+pub fn validate_with_nesting(
+    layers: &[LayerInput],
+    profile: &CuttingProfile,
+    rules: &RuleSet,
+    limits_physically_verified: bool,
+    nested_tiles: &BTreeMap<u32, Vec<Rect4>>,
 ) -> ValidationReport {
     let mut violations = Vec::new();
     let mut metrics = Vec::new();
@@ -176,7 +205,14 @@ pub fn validate(
 
     for layer in layers {
         let measured = measure_layer(layer);
-        check_layer(layer, &measured, profile, rules, &mut violations);
+        check_layer(
+            layer,
+            &measured,
+            profile,
+            rules,
+            nested_tiles.get(&layer.index),
+            &mut violations,
+        );
         metrics.push(measured);
     }
 
@@ -231,12 +267,24 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
     }
 }
 
+/// A tile bounding box as `[min_x, min_y, width, height]`.
+pub type Rect4 = [f64; 4];
+
+/// Comparison band for dimension checks, in millimetres.
+///
+/// Re-exported from the kernel so the epsilon has one definition
+/// (ADR-0004) rather than a second copy here.
+fn constants_band() -> f64 {
+    mask_kernel::MIN_WIDTH_EPS_MM
+}
+
 /// Apply the rule set to one layer.
 fn check_layer(
     layer: &LayerInput,
     metrics: &LayerMetrics,
     profile: &CuttingProfile,
     rules: &RuleSet,
+    tiles: Option<&Vec<Rect4>>,
     violations: &mut Vec<Violation>,
 ) {
     let limits = &profile.limits;
@@ -261,34 +309,100 @@ fn check_layer(
         }
     }
 
-    // layer_fits_field — can the plotter even reach this layer?
+    // layer_fits_field — can the plotter reach every printable piece?
+    //
+    // When a nesting plan exists the check applies to each tile, because the
+    // tiles are what actually gets printed. Measuring the uncut layer instead
+    // would keep reporting a problem that a successful nest has already solved.
     if let Some(rule) = rules.rule("layer_fits_field") {
-        let (_, _, w, _) = (
-            metrics.bbox[0],
-            metrics.bbox[1],
-            metrics.bbox[2],
-            metrics.bbox[3],
-        );
-        if w > limits.max_tile_width_mm {
-            violations.push(Violation {
-                code: rule.code.clone(),
-                severity: rule.severity,
-                layer_index: Some(layer.index),
-                measured: Some(w),
-                required: Some(limits.max_tile_width_mm),
-                count: 1,
-                headline: format!(
-                    "Слой {} шире рабочего поля: {:.1} мм при {:.1} мм.",
-                    layer.index, w, limits.max_tile_width_mm
-                ),
-                reason: rule.reason.to_string(),
-                actions: vec![Action {
-                    id: "nest".into(),
-                    label: "Разбить на плитки".into(),
-                    primary: true,
-                    estimated_fidelity_loss: Some(0.0),
-                }],
-            });
+        match tiles {
+            Some(rects) => {
+                // Compared with a tolerance band. A tile that measures exactly
+                // the field width does fit; without the band, float noise of
+                // 1e-7 mm was enough to report it as too large.
+                let too_wide = limits.max_tile_width_mm + crate::constants_band();
+                let too_long = limits.max_tile_length_mm + crate::constants_band();
+
+                let mut worst_width = 0.0_f64;
+                let mut worst_length = 0.0_f64;
+                let mut offending = 0usize;
+                for r in rects {
+                    let over_w = r[2] > too_wide;
+                    let over_l = r[3] > too_long;
+                    if over_w || over_l {
+                        offending += 1;
+                    }
+                    worst_width = worst_width.max(r[2]);
+                    worst_length = worst_length.max(r[3]);
+                }
+
+                if offending > 0 {
+                    // Report the axis that actually failed, not the larger of
+                    // the two: quoting a length against a width limit is how a
+                    // reader concludes the numbers are nonsense.
+                    let (measured, required) = if worst_width > too_wide {
+                        (worst_width, limits.max_tile_width_mm)
+                    } else {
+                        (worst_length, limits.max_tile_length_mm)
+                    };
+                    violations.push(Violation {
+                        code: rule.code.clone(),
+                        severity: rule.severity,
+                        layer_index: Some(layer.index),
+                        measured: Some(measured),
+                        required: Some(required),
+                        count: offending,
+                        headline: format!(
+                            "Слой {}: {} из {} плиток не помещаются в рабочее поле.",
+                            layer.index,
+                            offending,
+                            rects.len()
+                        ),
+                        reason: rule.reason.to_string(),
+                        actions: vec![Action {
+                            id: "nest_denser".into(),
+                            label: "Разбить плотнее".into(),
+                            primary: true,
+                            estimated_fidelity_loss: Some(0.0),
+                        }],
+                    });
+                }
+            }
+            None => {
+                let w = metrics.bbox[2];
+                let h = metrics.bbox[3];
+                let band = crate::constants_band();
+                if w > limits.max_tile_width_mm + band || h > limits.max_tile_length_mm + band {
+                    let (measured, required) = if w > limits.max_tile_width_mm + band {
+                        (w, limits.max_tile_width_mm)
+                    } else {
+                        (h, limits.max_tile_length_mm)
+                    };
+                    violations.push(Violation {
+                        code: rule.code.clone(),
+                        severity: rule.severity,
+                        layer_index: Some(layer.index),
+                        measured: Some(measured),
+                        required: Some(required),
+                        count: 1,
+                        headline: format!(
+                            "Слой {} не помещается в рабочее поле: {:.1}×{:.1} мм при {:.1}×{:.1} мм.",
+                            layer.index,
+                            w,
+                            h,
+                            limits.max_tile_width_mm,
+                            limits.max_tile_length_mm
+                        ),
+                        reason: rule.reason.to_string(),
+                        actions: vec![Action {
+                            id: "nest".into(),
+                            label: "Разбить на плитки".into(),
+                            primary: true,
+                            estimated_fidelity_loss: Some(0.0),
+                        }],
+                    });
+                }
+            }
         }
     }
 

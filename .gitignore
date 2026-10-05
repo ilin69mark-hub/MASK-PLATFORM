@@ -62,3 +62,6 @@ spike/**/target/
 # ── Engine build output ───────────────────────────────────────────────
 engine/target/
 engine/out/
+
+# ── Generated masks (produced by `make demo`) ─────────────────────
+engine/out/

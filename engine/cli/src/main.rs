@@ -11,11 +11,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mask_export::{project_svgs, ArtifactContext};
+use mask_export::{tile_to_svg, ArtifactContext, MarksToDraw};
 use mask_kernel::{union, widen, Point, Shapes};
+use mask_nesting::{fixed_grid, needs_nesting, NestRequest};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
-use mask_validate::{render, validate, LayerInput};
+use mask_validate::{render, validate_with_nesting, LayerInput, Rect4};
 
 /// Version stamped into every artifact, so reproduction can be verified later.
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -26,6 +27,7 @@ struct Args {
     plotter: PathBuf,
     out_dir: PathBuf,
     widen_to: Option<f64>,
+    nest: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -34,6 +36,7 @@ fn parse_args() -> Result<Args, String> {
     let mut plotter = None;
     let mut out_dir = None;
     let mut widen_to = None;
+    let mut nest = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -57,6 +60,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| format!("--widen-to expects a number, got {raw:?}"))?;
                 widen_to = Some(value);
             }
+            "--nest" => nest = true,
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown argument {other:?}\n\n{}", usage())),
         }
@@ -69,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
         plotter: plotter.ok_or("--plotter is required")?,
         out_dir: out_dir.unwrap_or_else(|| PathBuf::from("out")),
         widen_to,
+        nest,
     })
 }
 
@@ -77,7 +82,7 @@ fn usage() -> String {
 
 USAGE
   maskctl --fixture <file.json> --material <profile.json> \\
-          --plotter <profile.json> [--out <dir>] [--widen-to <mm>]"
+          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest]"
         .to_string()
 }
 
@@ -191,7 +196,63 @@ fn run(args: &Args) -> Result<bool, String> {
         println!();
     }
 
-    let report = validate(&layers, &profile, &rules, verified);
+    let nest_request = NestRequest {
+        field_width_mm: profile.limits.max_tile_width_mm,
+        field_length_mm: profile.limits.max_tile_length_mm,
+        separation_gap_mm: profile.limits.gap_mm,
+        kerf_mm: profile.limits.kerf_mm,
+    };
+
+    // Nesting happens before validation so the field rule is measured against
+    // what would actually be printed, not against the uncut mask.
+    let mut plans = Vec::new();
+    if args.nest {
+        for layer in &layers {
+            if needs_nesting(&layer.geometry, nest_request) {
+                match fixed_grid(&layer.geometry, nest_request) {
+                    Ok(plan) => {
+                        // Waste ratio is reported but not emphasised: for
+                        // line art almost the whole sheet is weeded away, so a
+                        // figure near 100% is expected, not a defect. The
+                        // number that costs money is sheets per layer.
+                        println!(
+                            "Nested L{:02}: {} tiles, {} sheets, waste {:.1}% (normal for line art), separation {} mm",
+                            layer.index,
+                            plan.summary.tile_count,
+                            plan.summary.tile_count,
+                            plan.summary.waste_ratio * 100.0,
+                            plan.summary.separation_gap_mm
+                        );
+                        plans.push((layer.index, layer.name.clone(), plan));
+                    }
+                    Err(e) => println!("Nested L{:02}: refused ({e})", layer.index),
+                }
+            }
+        }
+        if plans.is_empty() {
+            println!("No layer exceeded the working field; nothing to nest.");
+        }
+        println!();
+    }
+
+    // Tile rectangles go to the validator so the field rule is measured against
+    // what would actually be printed.
+    let mut tile_rects: std::collections::BTreeMap<u32, Vec<Rect4>> =
+        std::collections::BTreeMap::new();
+    for (index, _, plan) in &plans {
+        tile_rects.insert(
+            *index,
+            plan.tiles
+                .iter()
+                .map(|t| {
+                    let (_, _, w, h) = mask_kernel::bounding_box(&t.content);
+                    [0.0, 0.0, w, h]
+                })
+                .collect(),
+        );
+    }
+
+    let report = validate_with_nesting(&layers, &profile, &rules, verified, &tile_rects);
 
     println!("Measured:");
     for m in &report.layers {
@@ -221,28 +282,125 @@ fn run(args: &Args) -> Result<bool, String> {
         kerf_mm: profile.limits.kerf_mm,
     };
 
-    let export_inputs: Vec<(u32, String, Shapes)> = layers
-        .iter()
-        .map(|l| (l.index, l.name.clone(), l.geometry.clone()))
-        .collect();
+    // One unit per printable piece: a whole layer when no nesting is needed, a
+    // tile when it is. Keeping the tile inside the unit — rather than pairing
+    // two parallel lists by index — is what prevents a file from being labelled
+    // with the wrong tile.
+    struct OutputUnit {
+        layer_index: u32,
+        label: String,
+        geometry: Shapes,
+        tile: Option<MarksToDraw>,
+    }
 
-    let svgs = match project_svgs(&export_inputs, &report, &ctx) {
-        Ok(v) => v,
-        Err(e) => {
-            println!("Export skipped: {e}");
-            return Ok(false);
+    let units: Vec<OutputUnit> = if plans.is_empty() {
+        layers
+            .iter()
+            .map(|l| OutputUnit {
+                layer_index: l.index,
+                label: l.name.clone(),
+                geometry: l.geometry.clone(),
+                tile: None,
+            })
+            .collect()
+    } else {
+        let mut out = Vec::new();
+        for (index, name, plan) in &plans {
+            for t in &plan.tiles {
+                out.push(OutputUnit {
+                    layer_index: *index,
+                    label: name.clone(),
+                    geometry: t.content.clone(),
+                    tile: Some(MarksToDraw {
+                        marks: t.marks.clone(),
+                        rect: [t.rect.x_mm, t.rect.y_mm, t.rect.width_mm, t.rect.height_mm],
+                    }),
+                });
+            }
         }
+        out
     };
+
+    if !report.verdict.is_manufacturable() {
+        println!("Export skipped: the project is not manufacturable.");
+        for v in &report.violations {
+            if v.severity == mask_rules::Severity::Error
+                || v.severity == mask_rules::Severity::Fatal
+            {
+                println!("   {}", v.headline);
+            }
+        }
+        return Ok(false);
+    }
+    if units.iter().all(|u| u.geometry.is_empty()) {
+        println!("Export skipped: no piece carries any geometry.");
+        return Ok(false);
+    }
 
     fs::create_dir_all(&args.out_dir)
         .map_err(|e| format!("cannot create {}: {e}", args.out_dir.display()))?;
 
-    for (index, _name, svg) in &svgs {
-        let file = mask_export::artifact_name(&fixture.project_id, fixture.revision, *index, "svg");
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    let mut total_bytes = 0usize;
+    for unit in &units {
+        // A ragged mask can leave an empty grid cell. It is skipped rather than
+        // failing the run: the remaining tiles are still cuttable, and tile
+        // numbering stays intact because the plan still lists the empty cell.
+        if unit.geometry.is_empty() {
+            skipped += 1;
+            println!(
+                "  skipped tile {} — no mask content in this cell",
+                unit.tile.as_ref().map_or("", |t| t.marks.label.as_str())
+            );
+            continue;
+        }
+
+        let svg = match &unit.tile {
+            Some(tile) => tile_to_svg(
+                &unit.geometry,
+                unit.layer_index,
+                &unit.label,
+                &tile.marks.label,
+                tile,
+                &report,
+                &ctx,
+            ),
+            None => {
+                mask_export::to_svg(&unit.geometry, unit.layer_index, &unit.label, &report, &ctx)
+            }
+        };
+        let file = match &unit.tile {
+            Some(tile) => mask_export::tile_artifact_name(
+                &fixture.project_id,
+                fixture.revision,
+                unit.layer_index,
+                &tile.marks.label,
+                "svg",
+            ),
+            None => mask_export::artifact_name(
+                &fixture.project_id,
+                fixture.revision,
+                unit.layer_index,
+                "svg",
+            ),
+        };
         let path = args.out_dir.join(&file);
-        fs::write(&path, svg).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        fs::write(&path, &svg).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        written += 1;
+        total_bytes += svg.len();
         println!("  wrote {} ({} bytes)", path.display(), svg.len());
     }
+    println!(
+        "  {} file(s), {} bytes total{}",
+        written,
+        total_bytes,
+        if skipped > 0 {
+            format!(", {skipped} empty tile(s) skipped")
+        } else {
+            String::new()
+        }
+    );
 
     println!();
     println!(

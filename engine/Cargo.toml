@@ -5,6 +5,7 @@ members = [
     "profiles",
     "rules",
     "validate",
+    "nesting",
     "export",
     "cli",
 ]
@@ -28,6 +29,7 @@ mask-kernel = { path = "kernel" }
 mask-profiles = { path = "profiles" }
 mask-rules = { path = "rules" }
 mask-validate = { path = "validate" }
+mask-nesting = { path = "nesting" }
 mask-export = { path = "export" }
 
 [profile.release]

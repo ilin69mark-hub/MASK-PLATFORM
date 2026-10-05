@@ -1,10 +1,15 @@
 [package]
 name = "mask-cli"
+description = "maskctl — the walking skeleton: geometry plus profiles into printable masks."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[[bin]]
+name = "maskctl"
+path = "src/main.rs"
 
 [dependencies]
 mask-kernel.workspace = true
@@ -12,9 +17,6 @@ mask-profiles.workspace = true
 mask-rules.workspace = true
 mask-validate.workspace = true
 mask-export.workspace = true
+mask-nesting.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[[bin]]
-name = "maskctl"
-path = "src/main.rs"
