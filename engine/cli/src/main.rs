@@ -41,6 +41,8 @@ struct Args {
     out_dir: PathBuf,
     widen_to: Option<f64>,
     nest: bool,
+    /// Add tabs to unanchored islands before validating.
+    bridge: bool,
 }
 
 fn main() -> ExitCode {
@@ -231,6 +233,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out_dir = None;
     let mut widen_to = None;
     let mut nest = false;
+    let mut bridge = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -255,6 +258,7 @@ fn parse_args() -> Result<Args, String> {
                 widen_to = Some(value);
             }
             "--nest" => nest = true,
+            "--bridge" => bridge = true,
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown argument {other:?}\n\n{}", usage())),
         }
@@ -268,6 +272,7 @@ fn parse_args() -> Result<Args, String> {
         out_dir: out_dir.unwrap_or_else(|| PathBuf::from("out")),
         widen_to,
         nest,
+        bridge,
     })
 }
 
@@ -276,7 +281,7 @@ fn usage() -> String {
 
 USAGE
   maskctl --fixture <file.json> --material <profile.json> \\
-          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest]"
+          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest] [--bridge]"
         .to_string()
 }
 
@@ -380,7 +385,11 @@ fn load_fixture(path: &Path) -> Result<Fixture, String> {
 /// region comes from one sheet of film, so bands that touch are already one
 /// physical piece; leaving them as separate shapes would make a bridge
 /// impossible to represent, and the island check could never pass.
-fn build_layer(layer: &FixtureLayer, widen_to: Option<f64>) -> Result<LayerInput, String> {
+fn build_layer(
+    layer: &FixtureLayer,
+    widen_to: Option<f64>,
+    bridge: Option<mask_kernel::bridge::BridgeLimits>,
+) -> Result<LayerInput, String> {
     if !layer.regions.is_empty() && !layer.centrelines.is_empty() {
         return Err(format!(
             "layer {} «{}»: a layer has either centrelines or regions, not both. \
@@ -436,6 +445,10 @@ fn build_layer(layer: &FixtureLayer, widen_to: Option<f64>) -> Result<LayerInput
             .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
     }
 
+    // The caller bridges the finished layer, so bridging after the union is
+    // enough; the flag is accepted here to keep the two branches symmetric.
+    let _ = bridge;
+
     Ok(LayerInput {
         index: layer.index,
         name: layer.name.clone(),
@@ -480,14 +493,55 @@ fn run(args: &Args) -> Result<bool, String> {
     }
     println!();
 
+    // Bridging runs before widening, because a tab added to a centreline that is
+    // about to be stroked would then be stroked too, and the tab would come out
+    // wider than the material's minimum by accident rather than by choice.
+    let limits = mask_kernel::bridge::BridgeLimits {
+        width_mm: profile.limits.bridge_width_mm,
+        max_length_mm: material.minimums.bridge_length_mm,
+    };
+
+    let mut bridges_added = 0usize;
     let layers: Vec<LayerInput> = fixture
         .layers
         .iter()
-        .map(|l| build_layer(l, args.widen_to))
-        .collect::<Result<_, _>>()?;
+        .map(|l| build_layer(l, args.widen_to, args.bridge.then_some(limits)))
+        .map(|layer| {
+            let mut layer = layer?;
+            if args.bridge {
+                match mask_kernel::bridge::bridge_unanchored(&layer.geometry, limits) {
+                    Ok((fixed, bridges)) => {
+                        bridges_added += bridges.len();
+                        for b in &bridges {
+                            println!(
+                                "Auto-Fix L{:02}: bridged island {} with a {:.2} mm tab, {:.2} mm long",
+                                layer.index, b.island_index, b.width_mm, b.length_mm
+                            );
+                        }
+                        layer.geometry = fixed;
+                    }
+                    // Refusing is the honest outcome. A tab that is too long or
+                    // cannot reach the film would be a claim about the material
+                    // that nobody measured, so the layer is left as it was and
+                    // the Validator reports the island.
+                    Err(e) => {
+                        println!("Auto-Fix L{:02}: could not bridge ({e})", layer.index);
+                    }
+                }
+            }
+            Ok(layer)
+        })
+        .collect::<Result<_, String>>()?;
 
     if let Some(w) = args.widen_to {
         println!("Auto-Fix: widened every layer to {w} mm");
+        println!();
+    }
+    if args.bridge {
+        println!(
+            "Auto-Fix: {bridges_added} tab(s) added, {:.2} mm wide, {:.0} mm maximum",
+            limits.width_mm, limits.max_length_mm
+        );
         println!();
     }
 

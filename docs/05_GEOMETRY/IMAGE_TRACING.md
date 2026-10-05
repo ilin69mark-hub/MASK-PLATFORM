@@ -158,7 +158,7 @@ MASK ENGINE · trace
   layer 2      #000000   1984.00 mm²    496 px   2 region(s), 1 hole(s), narrowest 8.00 mm
 ```
 
-А затем валидация, которая отказывает по существу — белый остров не закреплён:
+Затем то же самое с `--bridge`, и проект становится годным:
 
 ```
 Verdict: Fail
@@ -173,6 +173,25 @@ Export skipped: the project is not manufacturable.
 Это и есть нужное поведение: путь из картинки работает, а результат всё равно не
 проходит, потому что в нём есть настоящая физическая проблема.
 
+Дальше — то же самое с мостом:
+
+```bash
+maskctl --fixture traced.json --material <profile> --plotter <profile> \
+        --out out/ --bridge
+```
+
+```
+Auto-Fix L01: bridged island 1 with a 1.20 mm tab, 16.97 mm long
+Auto-Fix: 1 tab(s) added, 1.20 mm wide, 25 mm maximum
+
+Verdict: Pass
+  fatal 0 · error 0 · warning 0 · info 1
+```
+
+Мост добавлен до валидации, и вердикт становится `PASS` — но в манифесте по-прежнему
+`"physical_proof": {"performed": false}`. Расчётное соответствие и физическое
+подтверждение остаются разными вещами.
+
 ## Чего здесь нет
 
 - Сглаживания кривых. Контуры многоугольные, поэтому радиус углов не
@@ -181,13 +200,15 @@ Export skipped: the project is not manufacturable.
 - Сегментации по смыслу. Цвет — это цвет, а не «деталь», «отверстие» или
   «разметка». Это решение человека, и его принимает профиль.
 - Распознавания штриховки, градиентов и текста.
-- Мостов для островов. Правило `unanchored_islands` находит проблему; автоматическое
-  соединение — отдельная задача.
+- Размещения мостов с учётом зон регистрации и `min_gap`. Само соединение
+  реализовано (`kernel/src/bridge.rs`, флаг `--bridge`); правила размещения из
+  TOPOLOGY_ENGINE.md §6.2 пункты 2–3 — нет.
 
 ## Проверка
 
 ```bash
 cargo test -p mask-kernel raster   # 15 тестов трассировки и разделения
+cargo test -p mask-kernel bridge   # 15 тестов мостов
 cargo test -p mask-cli             # 22 теста декодера и сквозного пути
-make check                         # полный конвейер
+make check                         # полный конвейер, 214 тестов
 ```

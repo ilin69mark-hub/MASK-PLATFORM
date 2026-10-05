@@ -8,6 +8,7 @@
 //! crate may hard-code a numeric tolerance.
 
 pub mod boolean;
+pub mod bridge;
 pub mod canonical;
 pub mod constants;
 pub mod geom;
