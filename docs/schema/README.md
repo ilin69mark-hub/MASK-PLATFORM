@@ -8,6 +8,7 @@
 |---|---|
 | `mask-project.v1.json` | Mask Project — источник истины (`MASK_PROJECT.md`) |
 | `manifest.v1.json` | Production Manifest — то, что читает сторонний производитель |
+| `fixture.v1.json` | Фикстура — исходная геометрия, которую читает `maskctl`. **Не** Mask Project, см. ADR-0014 |
 | `examples/mask-project.v1.example.json` | Валидный пример проекта |
 | `examples/manifest.v1.example.json` | Валидный пример манифеста |
 | `validate_examples.py` | Проверка схем и примеров, включая негативные случаи |
@@ -17,6 +18,9 @@
 ```bash
 python3 docs/schema/validate_examples.py
 ```
+
+Скрипт проверяет не только примеры, но и **все** файлы в `engine/fixtures/`:
+фикстура, формат которой никем не описан, — это не контракт.
 
 Требуется `jsonschema` (`pip install jsonschema`). Скрипт проверяет:
 
@@ -45,6 +49,8 @@ python3 docs/schema/validate_examples.py
 | I-7: снимки профилей в ревизии | **не** JSON Schema — транзакция |
 | Геометрическая корректность | **не** JSON Schema — `Topology Engine` |
 | Производимость | **не** JSON Schema — `Manufacturing Validator` |
+| Список кодов правил в `_expect` фикстуры | **не** JSON Schema — `RuleSet` и тест `every_fixture_does_what_it_claims` |
+| Геометрия фикстуры: замыкание, ориентация, самопересечения | **не** JSON Schema — `Topology Engine` |
 
 **Принцип:** схема описывает форму, а не смысл. Проверка смысла — работа
 детерминированного ядра. Схема не должна пытаться дублировать `Validator`,
@@ -74,4 +80,6 @@ python3 docs/schema/validate_examples.py
 
 Пример проекта содержит **три** слоя из шести, чтобы оставаться читаемым.
 Это допустимо: `minItems` = 1, инвариант I-1 требует хотя бы один слой.
-Полный шестислойный пример появится вместе с golden-фикстурами на Stage 2.
+Полный шестислойной Mask Project не появится из фикстур: фикстура — другой
+формат (ADR-0014), и шесть слоёв покрывает `engine/fixtures/t5_six_layers.json`
+как вход геометрии.

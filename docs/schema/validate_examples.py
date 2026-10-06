@@ -63,12 +63,14 @@ def check_rejects(schema, instance, label, mutate):
 def main():
     project_schema = load("mask-project.v1.json")
     manifest_schema = load("manifest.v1.json")
+    fixture_schema = load("fixture.v1.json")
     project = json.loads((FIXTURES / "mask-project.v1.example.json").read_text(encoding="utf-8"))
     manifest = json.loads((FIXTURES / "manifest.v1.example.json").read_text(encoding="utf-8"))
 
     passed = True
     print("── schemas are themselves valid ──")
-    for name, schema in (("mask-project", project_schema), ("manifest", manifest_schema)):
+    for name, schema in (("mask-project", project_schema), ("manifest", manifest_schema),
+                         ("fixture", fixture_schema)):
         try:
             Draft202012Validator.check_schema(schema)
             print(f"ok   {name}.v1.json")
@@ -79,6 +81,20 @@ def main():
     print("\n── examples must validate ──")
     passed &= check_positive(project_schema, project, "mask-project example")
     passed &= check_positive(manifest_schema, manifest, "manifest example")
+
+    # Every fixture in the repository, not a hand-picked example. A schema nothing
+    # is checked against is documentation; these are the documents that decide
+    # whether a check still fires.
+    print("\n── every fixture in engine/fixtures must validate ──")
+    fixture_dir = ROOT.parent.parent / "engine" / "fixtures"
+    fixture_paths = sorted(fixture_dir.glob("*.json"))
+    if not fixture_paths:
+        print(f"FAIL no fixtures found in {fixture_dir}")
+        passed = False
+    for path in fixture_paths:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        passed &= check_positive(fixture_schema, doc, path.name)
+    print(f"     {len(fixture_paths)} fixture(s)")
 
     print("\n── invariants must reject bad documents ──")
 
@@ -157,6 +173,56 @@ def main():
     passed &= check_rejects(
         manifest_schema, manifest, "performed proof without date rejected",
         lambda d: d["validation"]["physical_proof"].update(performed=True))
+
+    # A fixture has to state what it expects, or nothing can tell it apart from
+    # one that stopped testing anything.
+    sample = json.loads((fixture_dir / "proof_panel.json").read_text(encoding="utf-8"))
+    passed &= check_positive(fixture_schema, sample, "fixture sample (proof_panel)")
+    passed &= check_rejects(
+        fixture_schema, sample, "fixture without _expect rejected",
+        lambda d: d.pop("_expect"))
+    # A code that no rule ever emits is rejected by the Rust test that compares the
+    # expectation against the report, not here: spelling out the rule vocabulary in
+    # the schema would give the rule set a second source of truth, which the whole
+    # point of keeping meaning out of the schema is to avoid.
+    passed &= check_rejects(
+        fixture_schema, sample, "non-string rule code rejected",
+        lambda d: d["_expect"].update(errors=[42]))
+    passed &= check_rejects(
+        fixture_schema, sample, "duplicate rule code rejected",
+        lambda d: d["_expect"].update(errors=["min_gap", "min_gap"]))
+
+    # outcome=rejected means no verdict: a document claiming both is ambiguous.
+    rejected = json.loads((fixture_dir / "t10_self_intersection.json").read_text(encoding="utf-8"))
+    passed &= check_positive(fixture_schema, rejected, "fixture sample (rejected outcome)")
+    passed &= check_rejects(
+        fixture_schema, rejected, "rejected fixture carrying a verdict rejected",
+        lambda d: d["_expect"].update(verdict="FAIL"))
+    def claim_a_verdict_without_one(d):
+        # d["_expect"].update() would have worked here, but writing a new key is
+        # clearer than merging into the old one.
+        d["_expect"] = {"outcome": "verdict"}
+
+    passed &= check_rejects(
+        fixture_schema, rejected, "verdict outcome with no verdict rejected",
+        claim_a_verdict_without_one)
+
+    # Centrelines and regions in one layer leaves the stroke width ambiguous.
+    passed &= check_rejects(
+        fixture_schema, sample, "layer mixing centrelines and regions rejected",
+        lambda d: d["layers"][0].update(regions=[{"outer": [[0, 0], [10, 0], [10, 10]]}]))
+
+    # A production id must not be expressible here: MASK-000127 is never reused,
+    # and a fixture must not be able to collide with one.
+    passed &= check_rejects(
+        fixture_schema, sample, "production project id rejected in a fixture",
+        lambda d: d.update(project_id="MASK-000127"))
+
+    # A region needs three points to be a figure a knife can cut.
+    passed &= check_rejects(
+        fixture_schema, sample, "two-point region outline rejected",
+        lambda d: d["layers"][0].update(
+            centrelines=[], regions=[{"outer": [[0, 0], [10, 10]]}]))
 
     print()
     if passed:

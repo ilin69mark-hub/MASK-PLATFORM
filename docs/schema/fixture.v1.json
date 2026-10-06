@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maskplatform.dev/schema/fixture.v1.json",
+  "title": "Fixture v1",
+  "description": "Source geometry handed to maskctl: what to cut, on which layers, and what the engine must say about it. This is NOT a Mask Project. A Mask Project is the stored record of a production job — owner, source assets, provenance, layer graph, profile references, lineage — and a fixture has none of those and must not invent them. A fixture is the smaller thing the engine is pointed at, and `trace` writes one as its output. Units are millimetres (ADR-0004).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project_id", "revision", "layers", "_expect"],
+
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "pattern": "^MASK-[A-Z0-9]{2,6}-[0-9]{3}$",
+      "description": "Test identifier, deliberately not the production format: a production id is MASK-000127 and is never reused, so a fixture must not be able to collide with one."
+    },
+    "revision": { "type": "integer", "minimum": 1 },
+
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Carried into the manifest. Explicit rather than inferred: a manifest that guesses what it was made for is worse than one that says the target is unknown.",
+      "properties": {
+        "object": { "type": "string" },
+        "part": { "type": "string" },
+        "part_code": { "type": "string" },
+        "dimensions_mm": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+
+    "_comment": {
+      "type": "string",
+      "description": "Prose: what this fixture is for and what it is supposed to prove. Nothing enforces this, which is why _expect exists."
+    },
+
+    "_expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the engine must do with this fixture, in a form the test suite can read. Every fixture must state it: a fixture with no expectation is one nobody can tell apart from a fixture that quietly stopped testing anything.",
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {
+          "enum": ["verdict", "rejected"],
+          "description": "'verdict' — the fixture is validated. 'rejected' — the source-integrity gate refuses it before anything is merged, so it never reaches the Validator."
+        },
+        "verdict": {
+          "enum": ["PASS", "PASS_WITH_WARNINGS", "FAIL", "FATAL"],
+          "description": "Required when outcome is 'verdict', and forbidden when it is 'rejected'."
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Exactly the rule codes that must come back as errors. Compared as a set, so a new error appearing is a failure."
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Same for warnings."
+        }
+      },
+      "if": { "properties": { "outcome": { "const": "verdict" } }, "required": ["outcome"] },
+      "then": { "required": ["verdict"] },
+      "else": { "not": { "required": ["verdict"] } }
+    },
+
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/layer" }
+    }
+  },
+
+  "$defs": {
+    "point": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[x, y] in millimetres, never an object: the kernel takes a point, not a record about a point."
+    },
+
+    "polyline": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/point" },
+      "minItems": 2,
+      "description": "Two points is a segment. Stroking a segment produces a rectangle, which is a legitimate strip of film."
+    },
+
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "name"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "name": { "type": "string", "minLength": 1 },
+        "_comment": {
+          "type": "string",
+          "description": "Prose about this layer alone — which one is meant to be manufacturable, which one is the violation. Written by `trace` and by hand."
+        },
+        "_area_mm2": {
+          "type": "number",
+          "description": "Area of this layer's colour in the source image, informational. `trace` writes it so a traced fixture records what it saw; the engine derives area from geometry and never reads this."
+        },
+        "application_order": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Position in the paint sequence. Defaults to index. Two layers claiming the same order is a T-14 crossing, which is a fixture's business, not a schema's."
+        },
+        "width_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0,
+          "description": "Stroke width applied to every centreline in this layer."
+        },
+        "centrelines": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/polyline" },
+          "description": "'Make a line this wide.'"
+        },
+        "regions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/region" },
+          "description": "Areas cut along their own outline, with no stroke applied. What a traced image produces."
+        }
+      },
+      "description": "Centrelines and regions answer different questions and may not appear in one layer: stroking a traced outline would double every edge and shrink the hole in the middle, leaving the stroke width ambiguous. The two are mutually exclusive here so the mistake is caught before it becomes geometry nobody can interpret.",
+      "oneOf": [
+        { "required": ["centrelines"], "not": { "required": ["regions"] } },
+        { "required": ["regions"], "not": { "required": ["centrelines"] } }
+      ]
+    },
+
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outer"],
+      "properties": {
+        "outer": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/point" },
+          "minItems": 3,
+          "description": "Closed automatically. Three points is the smallest figure a knife can cut."
+        },
+        "holes": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/point" },
+            "minItems": 3
+          }
+        }
+      }
+    }
+  }
+}

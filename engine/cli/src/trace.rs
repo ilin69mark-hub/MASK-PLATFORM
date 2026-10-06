@@ -57,7 +57,7 @@ impl Default for TraceOptions {
             // Six is already more than most masks need; a photograph wants a
             // design decision, not a histogram.
             max_colours: 6,
-            project_id: "MASK-TRACE".to_string(),
+            project_id: "MASK-TRC-001".to_string(),
         }
     }
 }
