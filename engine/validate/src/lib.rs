@@ -224,11 +224,32 @@ impl Counts {
 }
 
 /// One mask layer as the validator sees it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerInput {
     pub index: u32,
     pub name: String,
     pub geometry: Shapes,
+    /// Tabs deliberately added to hold unanchored islands.
+    ///
+    /// Without this list a bridge is indistinguishable from any other part of the
+    /// geometry, so its width and length cannot be compared against the material:
+    /// T-06 and T-07 had no way to be evaluated at all. Recording a tab at the
+    /// moment it is made is the only place its identity exists.
+    ///
+    /// Defaults on read, so existing fixtures and manifests stay valid.
+    #[serde(default)]
+    pub bridges: Vec<BridgeRecord>,
+}
+
+/// One tab, as it was placed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BridgeRecord {
+    /// Perpendicular width of the neck.
+    pub width_mm: f64,
+    /// Span between the island and the film holding it.
+    pub length_mm: f64,
+    /// Where the tab meets the surrounding film.
+    pub at: Point,
 }
 
 /// Validate a project against a rule set.
@@ -702,6 +723,87 @@ fn check_layer(
         }
     }
 
+    // bridge_width (T-06) and bridge_length (T-07) — the tabs recorded when they
+    // were placed.
+    //
+    // These were unmeasurable before `LayerInput` carried the list. A bridge is
+    // merged into the geometry and becomes indistinguishable from any other part,
+    // so there was no way to ask about one. That is why the check now compares the
+    // recorded numbers rather than measuring the geometry: the measurement was
+    // never the problem, the identity was.
+    if let Some(rule) = rules.rule("bridge_width") {
+        let too_narrow: Vec<&BridgeRecord> = layer
+            .bridges
+            .iter()
+            .filter(|b| !meets_threshold(b.width_mm, limits.bridge_width_mm))
+            .collect();
+        if !too_narrow.is_empty() {
+            let narrowest = too_narrow
+                .iter()
+                .map(|b| b.width_mm)
+                .fold(f64::INFINITY, f64::min);
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(narrowest),
+                required: Some(limits.bridge_width_mm),
+                unit: Unit::Mm,
+                count: too_narrow.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} уже минимальной ширины {}. Самый узкий — {} мм.",
+                    layer.index,
+                    layer.name,
+                    counted(too_narrow.len(), "мост", "моста", "мостов"),
+                    format_measurement(narrowest, limits.bridge_width_mm),
+                    mask_kernel::report(narrowest)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![Action {
+                    id: "widen_bridge".into(),
+                    label: "Расширить мост".into(),
+                    primary: true,
+                    estimated_fidelity_loss: Some(0.001),
+                }],
+            });
+        }
+    }
+
+    if let Some(rule) = rules.rule("bridge_length") {
+        let too_long: Vec<&BridgeRecord> = layer
+            .bridges
+            .iter()
+            .filter(|b| b.length_mm > limits.bridge_length_mm)
+            .collect();
+        if !too_long.is_empty() {
+            let longest = too_long.iter().map(|b| b.length_mm).fold(0.0_f64, f64::max);
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(longest),
+                required: Some(limits.bridge_length_mm),
+                unit: Unit::Mm,
+                count: too_long.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} длиннее {}. Самый длинный — {} мм.",
+                    layer.index,
+                    layer.name,
+                    counted(too_long.len(), "мост", "моста", "мостов"),
+                    format_measurement(longest, limits.bridge_length_mm),
+                    mask_kernel::report(longest)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![Action {
+                    id: "split_bridge".into(),
+                    label: "Укоротить или снять".into(),
+                    primary: true,
+                    estimated_fidelity_loss: Some(0.02),
+                }],
+            });
+        }
+    }
+
     // self_intersection (T-08) — a contour that crosses itself. Signed area
     // assumes simplicity: the crossings cut the contour into lobes that cancel, so
     // the reported area is plausible and wrong. This project has been bitten twice
@@ -1043,6 +1145,7 @@ pub fn layer_from_contours(index: u32, name: &str, contours: Vec<Vec<[f64; 2]>>)
         index,
         name: name.to_string(),
         geometry: Shapes { shapes },
+        bridges: Vec::new(),
     }
 }
 
@@ -1130,6 +1233,7 @@ mod tests {
             index,
             name: format!("Layer {index}"),
             geometry: widen(&line, width).unwrap(),
+            bridges: Vec::new(),
         }
     }
 
@@ -1204,6 +1308,7 @@ mod tests {
             index,
             name: format!("Layer {index}"),
             geometry: Shapes { shapes },
+            bridges: Vec::new(),
         }
     }
 
@@ -1330,6 +1435,7 @@ mod tests {
             geometry: Shapes {
                 shapes: vec![Shape::new(contour)],
             },
+            bridges: Vec::new(),
         }
     }
 
@@ -1471,6 +1577,7 @@ mod tests {
             geometry: Shapes {
                 shapes: vec![Shape::new(contour)],
             },
+            bridges: Vec::new(),
         }
     }
 
@@ -1563,6 +1670,7 @@ mod tests {
             geometry: Shapes {
                 shapes: vec![Shape::new(open)],
             },
+            bridges: Vec::new(),
         };
         let report = run(vec![layer]);
         let v = report
@@ -1615,6 +1723,7 @@ mod tests {
             index,
             name: format!("Layer {index}"),
             geometry: Shapes { shapes },
+            bridges: Vec::new(),
         }
     }
 
@@ -1775,6 +1884,7 @@ mod tests {
             index,
             name: format!("Layer {index}"),
             geometry: joined,
+            bridges: Vec::new(),
         }
     }
 
@@ -1845,6 +1955,7 @@ mod tests {
             geometry: Shapes {
                 shapes: vec![Shape::new(contour)],
             },
+            bridges: Vec::new(),
         }
     }
 
@@ -1921,6 +2032,89 @@ mod tests {
         assert_eq!(report.counts.warning, 1);
     }
 
+    /// A layer with a recorded bridge of the given dimensions.
+    fn bridged_layer(index: u32, width_mm: f64, length_mm: f64) -> LayerInput {
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: widen(&[Point { x: 0.0, y: 0.0 }, Point { x: 40.0, y: 0.0 }], 1.0).unwrap(),
+            bridges: vec![BridgeRecord {
+                width_mm,
+                length_mm,
+                at: Point { x: 10.0, y: 0.0 },
+            }],
+        }
+    }
+
+    #[test]
+    fn a_too_narrow_bridge_fails_t06() {
+        // The material asks for 1.20 mm. A 0.6 mm tab peels off with the waste.
+        let report = run(vec![bridged_layer(1, 0.6, 10.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "bridge_width")
+            .expect("a 0.6 mm bridge must violate a 1.20 mm minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert!((v.measured.expect("measured") - 0.6).abs() < 1e-6);
+        assert_eq!(v.required, Some(1.20));
+    }
+
+    #[test]
+    fn a_bridge_at_the_minimum_width_passes() {
+        let report = run(vec![bridged_layer(1, 1.2, 10.0)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "bridge_width"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn an_over_long_bridge_warns_on_t07() {
+        // A warning: it is still cuttable, it just tears during the peel.
+        let report = run(vec![bridged_layer(1, 1.2, 40.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "bridge_length")
+            .expect("a 40 mm bridge must exceed the 25 mm maximum");
+        assert_eq!(v.severity, Severity::Warning);
+        assert_eq!(v.count, 1);
+        assert!(
+            !matches!(report.verdict, Verdict::Fail),
+            "T-07 must not block output"
+        );
+    }
+
+    #[test]
+    fn a_layer_without_bridges_says_nothing_about_them() {
+        // No list, no findings. Otherwise every layer without a tab would report a
+        // zero-width bridge.
+        let report = run(vec![band_layer(1, 0.80, 200.0)]);
+        assert!(!report.violations.iter().any(|v| v.code == "bridge_width"));
+        assert!(!report.violations.iter().any(|v| v.code == "bridge_length"));
+    }
+
+    #[test]
+    fn a_bridge_recorded_on_the_wire_round_trips() {
+        // The field is serde-defaulted so old manifests still read, but a recorded
+        // bridge has to survive a round trip or the check is useless in the API.
+        let layer = bridged_layer(1, 1.4, 12.0);
+        let text = serde_json::to_string(&layer).expect("serialise");
+        let back: LayerInput = serde_json::from_str(&text).expect("deserialise");
+        assert_eq!(back.bridges.len(), 1);
+        assert!((back.bridges[0].width_mm - 1.4).abs() < 1e-9);
+        assert!((back.bridges[0].length_mm - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_old_layer_without_the_field_still_reads() {
+        let json = r#"{"index":1,"name":"Old","geometry":{"shapes":[]}}"#;
+        let layer: LayerInput = serde_json::from_str(json).expect("old payloads stay readable");
+        assert!(layer.bridges.is_empty());
+    }
+
     #[test]
     fn an_empty_project_is_fatal() {
         let report = run(vec![]);
@@ -1971,6 +2165,7 @@ mod tests {
             index: 1,
             name: "hostile".into(),
             geometry: Shapes { shapes: vec![] },
+            bridges: Vec::new(),
         };
         let report = run(vec![hostile]);
         assert!(
@@ -2018,6 +2213,7 @@ mod tests {
             geometry: Shapes {
                 shapes: vec![outer, patch],
             },
+            bridges: Vec::new(),
         };
         let report = run(vec![layer]);
         let v = report
@@ -2075,6 +2271,7 @@ mod tests {
             index: 1,
             name: "Bridged".into(),
             geometry: merged,
+            bridges: Vec::new(),
         }]);
         assert!(
             !report

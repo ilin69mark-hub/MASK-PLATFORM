@@ -351,6 +351,10 @@ fn extract_layers(value: &serde_json::Value) -> Result<Vec<LayerInput>, JsError>
             index,
             name,
             geometry,
+            // Bridges are not part of the geometry over the wire, so the browser
+            // facade has no tabs to record. The T-06 and T-07 numbers come from
+            // the server, which does place them.
+            bridges: Vec::new(),
         });
     }
     Ok(out)

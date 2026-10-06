@@ -21,6 +21,8 @@ pub struct EffectiveLimits {
     pub island_area_mm2: f64,
     /// Minimum feature length, from `material.minimums.feature_length_mm`.
     pub feature_length_mm: f64,
+    /// Longest cuttable tab, from `material.minimums.bridge_length_mm`.
+    pub bridge_length_mm: f64,
     pub corner_radius_mm: f64,
     /// Minimum interior angle, from `material.limits.min_angle_deg`.
     pub min_angle_deg: f64,
@@ -138,6 +140,7 @@ impl CuttingProfile {
                 island_width_mm,
                 island_area_mm2: material.minimums.island_area_mm2,
                 feature_length_mm: material.minimums.feature_length_mm,
+                bridge_length_mm: material.minimums.bridge_length_mm,
                 corner_radius_mm,
                 min_angle_deg: material.limits.min_angle_deg,
                 bridge_width_mm,
@@ -213,6 +216,7 @@ impl Rule {
             "island_width_mm" => limits.island_width_mm,
             "island_area_mm2" => limits.island_area_mm2,
             "feature_length_mm" => limits.feature_length_mm,
+            "bridge_length_mm" => limits.bridge_length_mm,
             "corner_radius_mm" => limits.corner_radius_mm,
             "min_angle_deg" => limits.min_angle_deg,
             "bridge_width_mm" => limits.bridge_width_mm,
@@ -341,6 +345,15 @@ impl RuleSet {
                 reason: "Мост такой ширины оторвётся при снятии маски.".into(),
             },
             Rule {
+                code: "bridge_length".into(),
+                severity: Severity::Warning,
+                measure: Measure::BridgeWidth,
+                auto_fixable: false,
+                threshold: "bridge_length_mm".into(),
+                headline: "{n} мостов длиннее {required} мм.".into(),
+                reason: "Слишком длинный мост оторвётся при снятии маски.".into(),
+            },
+            Rule {
                 code: "layer_density".into(),
                 severity: Severity::Warning,
                 measure: Measure::LayerDensity,
@@ -395,10 +408,10 @@ mod tests {
                 gap_mm: 0.90,
                 island_area_mm2: 2.40,
                 feature_length_mm: 3.00,
+                bridge_length_mm: 25.0,
                 island_width_mm: 0.60,
                 corner_radius_mm: 0.40,
                 bridge_width_mm: 1.20,
-                bridge_length_mm: 25.0,
             },
             physical: Physical {
                 adhesion: "medium".into(),

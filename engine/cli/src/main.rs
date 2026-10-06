@@ -484,6 +484,7 @@ fn build_layer(
             index: layer.index,
             name: layer.name.clone(),
             geometry: merged,
+            bridges: Vec::new(),
         });
     }
 
@@ -512,6 +513,7 @@ fn build_layer(
         index: layer.index,
         name: layer.name.clone(),
         geometry: merged,
+        bridges: Vec::new(),
     })
 }
 
@@ -632,6 +634,17 @@ fn run(args: &Args) -> Result<bool, String> {
                             );
                         }
                         layer.geometry = fixed;
+                        // Record the tabs, so T-06 and T-07 have something to
+                        // check. Without this the tabs are geometry and nothing can
+                        // ask about them afterwards.
+                        layer.bridges = bridges
+                            .iter()
+                            .map(|b| mask_validate::BridgeRecord {
+                                width_mm: b.width_mm,
+                                length_mm: b.length_mm,
+                                at: b.to,
+                            })
+                            .collect();
                     }
                     // Refusing is the honest outcome. A tab that is too long or
                     // cannot reach the film would be a claim about the material
