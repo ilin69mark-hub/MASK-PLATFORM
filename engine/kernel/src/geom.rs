@@ -79,9 +79,177 @@ impl Point {
 pub struct Contour {
     pub points: Vec<Point>,
     pub closed: bool,
+    /// Runs of straight edges that are really arcs.
+    ///
+    /// Empty means every edge is straight, which is what every contour looked
+    /// like before this field existed and what tracing, bridging and the raster
+    /// stage all still produce. That is the point of the representation: adding
+    /// curves did not change the meaning of any existing contour, so nothing
+    /// downstream had to be rewritten and no measurement silently changed.
+    ///
+    /// The representation is **chordal**. An arc names two points that already
+    /// exist in `points` and describes the curve between them. Nothing moves: the
+    /// endpoints, the area and the boolean operations are unchanged, and what is
+    /// added is the knowledge that the path between them is a curve of a stated
+    /// radius.
+    ///
+    /// Why chordal rather than true arcs as primitives: the boolean library takes
+    /// polygons, so any curve has to be flattened for it anyway. Storing the exact
+    /// arc beside its chord means the flattening is a choice — with a tolerance
+    /// you choose — rather than a permanent loss.
+    #[serde(default)]
+    pub arcs: Vec<ArcSegment>,
+}
+
+/// One arc, replacing a run of straight edges between two existing points.
+///
+/// `from` and `to` index into [`Contour::points`]; `to` is exclusive, so the run is
+/// `from .. to`. The arc starts exactly at `points[from]` and ends exactly at
+/// `points[to]`, which is what makes the endpoints agree with the chordal
+/// representation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ArcSegment {
+    pub from: usize,
+    pub to: usize,
+    pub centre: Point,
+    pub radius: f64,
+    /// Direction of travel. The arc goes counter-clockwise about `centre` when true.
+    pub ccw: bool,
+}
+
+/// Points approximating one arc, from `from` up to but not including `to`.
+///
+/// The step comes from the sagitta: a chord subtending angle `a` on radius `r`
+/// deviates from the curve by at most `r (1 - cos(a/2))`, so the step that keeps
+/// the deviation under `tolerance` is `a = 2 acos(1 - tolerance / r)`.
+///
+/// The tolerance is a caller choice, not a constant: how closely a curve has to
+/// match its chord is a question about the tool, and the plotter profile is where
+/// that number comes from. A tolerance at or beyond the radius would ask for a
+/// single chord, which approximates nothing, so the step count is floored at two.
+fn arc_points(from: Point, to: Point, arc: &ArcSegment, tolerance_mm: f64) -> Vec<Point> {
+    const MIN_STEPS: usize = 2;
+    const MAX_STEPS: usize = 512;
+
+    let start_angle = (from.y - arc.centre.y).atan2(from.x - arc.centre.x);
+    let mut sweep = (to.y - arc.centre.y).atan2(to.x - arc.centre.x) - start_angle;
+    if arc.ccw && sweep < 0.0 {
+        sweep += std::f64::consts::TAU;
+    }
+    if !arc.ccw && sweep > 0.0 {
+        sweep -= std::f64::consts::TAU;
+    }
+
+    let steps = if arc.radius <= 0.0 || tolerance_mm <= 0.0 {
+        MIN_STEPS
+    } else {
+        let ratio = (tolerance_mm / arc.radius).clamp(0.0, 1.0);
+        let step = 2.0 * (1.0 - ratio).acos();
+        if !step.is_finite() || step <= 0.0 {
+            MAX_STEPS
+        } else {
+            ((sweep.abs() / step).ceil() as usize).clamp(MIN_STEPS, MAX_STEPS)
+        }
+    };
+
+    (0..steps)
+        .map(|i| {
+            let t = start_angle + sweep * (i as f64) / (steps as f64);
+            Point {
+                x: arc.centre.x + arc.radius * t.cos(),
+                y: arc.centre.y + arc.radius * t.sin(),
+            }
+        })
+        .collect()
 }
 
 impl Contour {
+    /// A contour with straight edges only.
+    #[must_use]
+    pub fn straight(points: Vec<Point>, closed: bool) -> Self {
+        Self {
+            points,
+            closed,
+            arcs: Vec::new(),
+        }
+    }
+
+    /// Whether this contour carries any curve.
+    #[must_use]
+    pub fn has_arcs(&self) -> bool {
+        !self.arcs.is_empty()
+    }
+
+    /// The smallest arc radius in this contour.
+    ///
+    /// This is the measurement T-05 asks for. It is `None` for a polyline, and
+    /// that is not a gap: a polyline has no radius, which is exactly why T-05 was
+    /// inapplicable to polygonal geometry. Once a contour carries arcs, the number
+    /// exists and this returns it.
+    #[must_use]
+    pub fn min_arc_radius(&self) -> Option<f64> {
+        self.arcs
+            .iter()
+            .map(|a| a.radius)
+            .filter(|r| *r > 0.0)
+            .fold(None, |acc: Option<f64>, r| {
+                Some(acc.map_or(r, |acc: f64| acc.min(r)))
+            })
+    }
+
+    /// Replace every arc with straight segments within `tolerance_mm`.
+    ///
+    /// What the boolean library and every measurement see. The tolerance is a
+    /// choice, not a constant, because "how closely does this curve have to match
+    /// its chord" is a question about the tool, and the plotter profile is where
+    /// that number comes from.
+    #[must_use]
+    pub fn flattened(&self, tolerance_mm: f64) -> Contour {
+        if self.arcs.is_empty() {
+            return self.clone();
+        }
+
+        // Build a map from each point index to the arc that starts there.
+        let mut by_start: std::collections::BTreeMap<usize, &ArcSegment> =
+            std::collections::BTreeMap::new();
+        for arc in &self.arcs {
+            by_start.insert(arc.from, arc);
+        }
+
+        let mut points = Vec::with_capacity(self.points.len() + self.arcs.len() * 8);
+        let n = self.points.len();
+        let segments = if self.closed { n } else { n - 1 };
+        for i in 0..segments {
+            let next = (i + 1) % n;
+            match by_start.get(&i) {
+                Some(arc) if arc.to == next => {
+                    points.extend(arc_points(
+                        self.points[i],
+                        self.points[next],
+                        arc,
+                        tolerance_mm,
+                    ));
+                }
+                _ => points.push(self.points[i]),
+            }
+        }
+        if self.closed {
+            if let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) {
+                if first.distance_to(last) <= crate::constants::GEOM_EPS_MM {
+                    points.pop();
+                }
+            }
+        } else {
+            points.push(self.points[n - 1]);
+        }
+
+        Contour {
+            points,
+            closed: self.closed,
+            arcs: Vec::new(),
+        }
+    }
+
     /// Validate structure without changing the points.
     ///
     /// This does not deduplicate points or remove degenerate segments; that is
@@ -246,7 +414,183 @@ impl Shapes {
 mod tests {
     use super::*;
 
+    fn p(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
     const LIMIT: f64 = 100_000.0;
+
+    #[test]
+    fn an_empty_arc_list_means_every_edge_is_straight() {
+        // The property the whole representation rests on: every contour that existed
+        // before this field must keep meaning exactly what it meant.
+        let contour = Contour::straight(
+            vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0)],
+            true,
+        );
+        assert!(!contour.has_arcs());
+        assert_eq!(contour.min_arc_radius(), None);
+        // Flattening is the identity.
+        let flat = contour.flattened(0.05);
+        assert_eq!(flat.points, contour.points);
+        assert!(flat.arcs.is_empty());
+    }
+
+    /// A circle as four points and four arcs, each a quarter turn.
+    ///
+    /// The arcs have to be geometrically real: both endpoints of an arc must lie
+    /// on the circle of the stated radius. My first attempt used a square with one
+    /// corner "rounded", where the start point sat on the centre rather than the
+    /// circumference, so the sweep came out zero and the flattening silently
+    /// returned four points — which is how a broken test can look like a passing
+    /// one if nobody checks what it produced.
+    fn circle(radius: f64) -> Contour {
+        let points = vec![
+            p(radius, 0.0),
+            p(0.0, radius),
+            p(-radius, 0.0),
+            p(0.0, -radius),
+        ];
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: p(0.0, 0.0),
+                radius,
+                ccw: true,
+            })
+            .collect();
+        Contour {
+            points,
+            closed: true,
+            arcs,
+        }
+    }
+
+    #[test]
+    fn a_contour_can_carry_arcs() {
+        let contour = circle(10.0);
+        assert!(contour.has_arcs());
+        assert!((contour.min_arc_radius().expect("a radius") - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn flattening_an_arc_approximates_it_within_the_tolerance() {
+        let contour = circle(10.0);
+        let flat = contour.flattened(0.01);
+        assert!(
+            flat.points.len() > contour.points.len(),
+            "an arc needs more than one edge: got {}",
+            flat.points.len()
+        );
+
+        // Every flattened point must sit on the circle.
+        let mut worst: f64 = 0.0;
+        for q in &flat.points {
+            worst = worst.max((q.distance_to(p(0.0, 0.0)) - 10.0).abs());
+        }
+        assert!(
+            worst <= 0.01 + 1e-9,
+            "points should lie on the arc, worst {worst:.6}"
+        );
+    }
+
+    #[test]
+    fn the_flattened_arc_hugs_the_circle_to_the_tolerance() {
+        // The sagitta is the real check: every chord of the flattened arc must
+        // stay within the tolerance of the curve, not merely have its endpoints
+        // on it.
+        let flat = circle(10.0).flattened(0.05);
+        let mut worst = 0.0_f64;
+        for i in 0..flat.points.len() {
+            let a = flat.points[i];
+            let b = flat.points[(i + 1) % flat.points.len()];
+            // Midpoint of the chord against the circle.
+            let mid = p((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+            worst = worst.max((10.0 - mid.distance_to(p(0.0, 0.0))).abs());
+        }
+        assert!(
+            worst <= 0.05 + 1e-9,
+            "sagitta {worst:.6} exceeds the 0.05 mm tolerance"
+        );
+    }
+
+    #[test]
+    fn a_finer_tolerance_gives_more_segments() {
+        let coarse = circle(10.0).flattened(0.5).points.len();
+        let fine = circle(10.0).flattened(0.001).points.len();
+        assert!(fine > coarse, "finer tolerance: {fine} vs {coarse}");
+    }
+
+    #[test]
+    fn flattening_a_closed_contour_does_not_double_the_seam() {
+        let flat = circle(10.0).flattened(0.02);
+        assert!(flat.closed);
+        let first = flat.points[0];
+        let last = *flat.points.last().expect("points");
+        assert!(
+            first.distance_to(last) > 1e-9,
+            "the seam must not double up"
+        );
+    }
+
+    #[test]
+    fn the_narrowest_arc_in_a_contour_is_reported() {
+        let contour = Contour {
+            points: vec![
+                p(0.0, 0.0),
+                p(10.0, 0.0),
+                p(10.0, 10.0),
+                p(5.0, 10.0),
+                p(0.0, 10.0),
+            ],
+            arcs: vec![
+                ArcSegment {
+                    from: 2,
+                    to: 3,
+                    centre: p(7.5, 10.0),
+                    radius: 2.5,
+                    ccw: true,
+                },
+                ArcSegment {
+                    from: 3,
+                    to: 4,
+                    centre: p(2.5, 10.0),
+                    radius: 2.5,
+                    ccw: true,
+                },
+            ],
+            closed: true,
+        };
+        assert!((contour.min_arc_radius().expect("a radius") - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_arc_list_survives_serialisation() {
+        let contour = Contour {
+            points: vec![p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0), p(0.0, 0.0)],
+            arcs: vec![ArcSegment {
+                from: 3,
+                to: 0,
+                centre: p(0.0, 0.0),
+                radius: 10.0,
+                ccw: false,
+            }],
+            closed: true,
+        };
+        let text = serde_json::to_string(&contour).expect("serialise");
+        let back: Contour = serde_json::from_str(&text).expect("deserialise");
+        assert_eq!(back, contour);
+    }
+
+    #[test]
+    fn an_old_contour_without_the_field_still_reads() {
+        // Every fixture and manifest written before curves existed must keep loading.
+        let json = r#"{"points":[{"x":0,"y":0},{"x":10,"y":0}],"closed":true}"#;
+        let contour: Contour = serde_json::from_str(json).expect("old payloads stay readable");
+        assert!(contour.arcs.is_empty());
+        assert!(!contour.has_arcs());
+    }
 
     #[test]
     fn point_rejects_nan() {
@@ -271,6 +615,7 @@ mod tests {
         let c = Contour {
             points: vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }],
             closed: true,
+            arcs: Vec::new(),
         };
         assert_eq!(
             c.validate(LIMIT),
@@ -290,6 +635,7 @@ mod tests {
                 Point { x, y: y + h },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         let bad = Shape::with_holes(ccw(0.0, 0.0, 20.0, 20.0), vec![ccw(5.0, 5.0, 10.0, 10.0)]);
         assert_eq!(
@@ -310,6 +656,7 @@ mod tests {
                 Point { x, y: y + h },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         let cw = |x: f64, y: f64, w: f64, h: f64| Contour {
             points: vec![
@@ -319,6 +666,7 @@ mod tests {
                 Point { x: x + w, y },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         let good = Shape::with_holes(ccw(0.0, 0.0, 20.0, 20.0), vec![cw(5.0, 5.0, 10.0, 10.0)]);
         assert!(good.validate_orientation().is_ok());
@@ -330,6 +678,7 @@ mod tests {
             Contour {
                 points: vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.0, y: 0.0 }],
                 closed: true,
+                arcs: Vec::new(),
             },
             vec![Contour {
                 points: vec![
@@ -338,6 +687,7 @@ mod tests {
                     Point { x: 1.0, y: 1.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }],
         );
         // Orientation carries no information for a zero-area outer, so this must
@@ -355,6 +705,7 @@ mod tests {
                 Point { x: 0.0, y: y + 1.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         let shape = Shape::with_holes(rect(0.0), vec![rect(0.2), rect(0.4)]);
         assert_eq!(shape.contour_count(), 3);

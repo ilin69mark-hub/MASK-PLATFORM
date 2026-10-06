@@ -275,6 +275,7 @@ mod tests {
         Contour {
             points: pts,
             closed: true,
+            arcs: Vec::new(),
         }
     }
 
@@ -442,6 +443,7 @@ mod tests {
         let open = Contour {
             points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)],
             closed: false,
+            arcs: Vec::new(),
         };
         let found = open_cut_contours(&layer(vec![Shape::new(open)]));
         assert_eq!(found.len(), 1, "one open contour: {found:?}");
@@ -471,6 +473,7 @@ mod tests {
         let spiral = Contour {
             points: vec![p(5.0, 5.0), p(15.0, 5.0), p(15.0, 15.0)],
             closed: false,
+            arcs: Vec::new(),
         };
         let found = open_cut_contours(&layer(vec![Shape::with_holes(outer, vec![spiral])]));
         assert_eq!(found.len(), 1);

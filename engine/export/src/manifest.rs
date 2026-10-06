@@ -294,6 +294,7 @@ mod tests {
         Shapes::single(Shape::new(Contour {
             points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 5.0), p(0.0, 5.0)],
             closed: true,
+            arcs: Vec::new(),
         }))
     }
 

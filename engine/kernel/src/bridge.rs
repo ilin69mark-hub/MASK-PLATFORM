@@ -290,6 +290,7 @@ fn tab_polygon(from: Point, to: Point, width_mm: f64) -> Result<Contour, BridgeE
     let contour = Contour {
         points: vec![a, b, c, d],
         closed: true,
+        arcs: Vec::new(),
     };
     contour.validate(MAX_COORDINATE_MM)?;
     Ok(contour)
@@ -308,6 +309,7 @@ mod tests {
         Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + w), p(x, y + w)],
             closed: true,
+            arcs: Vec::new(),
         }
     }
 
@@ -323,6 +325,7 @@ mod tests {
                 p(x + w - hole, y + hole),
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         outer.validate(MAX_COORDINATE_MM).expect("outer");
         inner.validate(MAX_COORDINATE_MM).expect("hole");

@@ -11,10 +11,10 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, format_area, format_degrees, format_measurement, intersection, meets_threshold,
-    min_gap, min_width, narrowest_neck, open_cut_contours, self_intersections, shape_area,
-    shapes_area, sharp_corners, shortest_edge_in, unanchored_islands, Contour, Point, Shape,
-    Shapes,
+    bounding_box, format_area, format_degrees, format_measurement, has_curves, intersection,
+    meets_threshold, min_corner_radius, min_gap, min_width, narrowest_neck, open_cut_contours,
+    self_intersections, shape_area, shapes_area, sharp_corners, shortest_edge_in,
+    unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -366,90 +366,6 @@ pub fn validate_with_registration(
         metrics.push(measured);
     }
 
-    // peelability (T-11) — not modelled, and the rule exists to say so.
-    //
-    // Peelability is not a geometric threshold. Whether a feature survives being
-    // removed depends on the film, the adhesive and the angle the operator pulls
-    // at, and the only real number available is `peel_angle_min_deg`, which comes
-    // from a physical test on a real sheet. Nothing in the geometry can be compared
-    // against it that would mean anything.
-    //
-    // What geometry does cover is already checked: a feature too thin to hold is
-    // T-01, too little of it to stay put is T-03, and one that will fall off is
-    // T-04. So this note is not covering a gap — it is saying the remaining
-    // physics is a procedure, not a measurement.
-    //
-    // One thing it does check: that the profile's peel rate is one this build can
-    // interpret. A value nobody recognises means the declared behaviour is not
-    // being applied, which would silently weaken every future check here.
-    if let Some(rule) = rules.rule("peelability") {
-        let known = matches!(
-            profile.limits.peel_rate.as_str(),
-            "slow" | "moderate" | "fast"
-        );
-        if known {
-            violations.push(Violation {
-                code: rule.code.clone(),
-                severity: Severity::Info,
-                layer_index: None,
-                measured: None,
-                required: Some(profile.limits.line_width_mm),
-                unit: Unit::Mm,
-                count: 0,
-                headline: "Снятие не смоделировано: это процедура, а не измерение.".into(),
-                reason: format!(
-                    "Плёнка снимается под углом не менее {}° со скоростью {}. Геометрия проверяется через ширину (T-01) и островки (T-03).",
-                    profile.limits.peel_angle_min_deg, profile.limits.peel_rate
-                ),
-                actions: vec![Action { id: "acknowledge".into(), label: "Понятно".into(), primary: false, estimated_fidelity_loss: None }],
-            });
-        } else {
-            violations.push(Violation {
-                code: rule.code.clone(),
-                severity: Severity::Warning,
-                layer_index: None,
-                measured: None,
-                required: Some(profile.limits.line_width_mm),
-                unit: Unit::Mm,
-                count: 0,
-                headline: format!(
-                    "Скорость снятия «{}» этой сборке неизвестна.",
-                    profile.limits.peel_rate
-                ),
-                reason: "Заявленное поведение плёнки не будет применено: снятие и так не смоделировано, а теперь даже его параметры прочитать нельзя.".into(),
-                actions: vec![Action { id: "review_profile".into(), label: "Проверить профиль материала".into(), primary: true, estimated_fidelity_loss: None }],
-            });
-        }
-    }
-
-    // T-05 is stated as a radius and cannot be measured on polygonal contours:
-    // every vertex has radius zero, so the number is not in the geometry. Saying
-    // so once per run is right — six copies would bury the real violations.
-    //
-    // This is not replaced by T-14, it is the same requirement measured a way the
-    // geometry allows. `minimums.corner_radius_mm` is documented as "a sharp
-    // internal angle tears the film", so the angle is the requirement and the
-    // radius is only the shape of the fix.
-    if rules.rule("corner_radius").is_some() {
-        violations.push(Violation {
-            code: "corner_radius".into(),
-            severity: Severity::Info,
-            layer_index: None,
-            measured: None,
-            required: Some(profile.limits.corner_radius_mm),
-            unit: Unit::Mm,
-            count: 0,
-            headline: "Радиус углов не измеряется: контуры многоугольные.".into(),
-            reason: "Острый угол проверяется правилом min_angle. Радиус станет доступен, когда геометрия будет хранить кривые.".into(),
-            actions: vec![Action {
-                id: "acknowledge".into(),
-                label: "Понятно".into(),
-                primary: false,
-                estimated_fidelity_loss: None,
-            }],
-        });
-    }
-
     // registration (T-15) — the layers have to land on top of each other.
     //
     // Two errors add up: what the plotter itself can hold, and what the geometry
@@ -533,6 +449,32 @@ pub fn validate_with_registration(
                         estimated_fidelity_loss: None,
                     },
                 ],
+            });
+        }
+    }
+
+    // A project with no curves anywhere gets one note, so the check stays
+    // discoverable. Without it the rule would simply never appear, which is how it
+    // spent its whole life before curves existed.
+    if !layers.iter().any(|l| has_curves(&l.geometry)) {
+        if let Some(rule) = rules.rule("corner_radius") {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: Severity::Info,
+                layer_index: None,
+                measured: None,
+                required: Some(profile.limits.corner_radius_mm),
+                unit: Unit::Mm,
+                count: 0,
+                headline: "Кривых в проекте нет: минимальный радиус угла не проверяется.".into(),
+                reason: "Проверка включается автоматически, как только контур содержит дугу."
+                    .into(),
+                actions: vec![Action {
+                    id: "acknowledge".into(),
+                    label: "Понятно".into(),
+                    primary: false,
+                    estimated_fidelity_loss: None,
+                }],
             });
         }
     }
@@ -690,6 +632,110 @@ fn check_layer(
     violations: &mut Vec<Violation>,
 ) {
     let limits = &profile.limits;
+
+    // corner_radius (T-05) — the narrowest curve the knife must follow.
+    //
+    // This used to be an unconditional note that the check did not apply, because
+    // polygonal geometry has no radius: a vertex is infinitely sharp, so the number
+    // is zero everywhere and a check against it would fail on every shape for a
+    // reason that means nothing.
+    //
+    // Contours now carry arcs, so the radius exists. The check is applied when the
+    // geometry has curves and stays silent when it does not — which is now a fact
+    // about the geometry rather than an assumption about it.
+    if let Some(rule) = rules.rule("corner_radius") {
+        if has_curves(&layer.geometry) {
+            let radius = min_corner_radius(&layer.geometry).expect("curves exist");
+            if !meets_threshold(radius, limits.corner_radius_mm) {
+                violations.push(Violation {
+                    code: rule.code.clone(),
+                    severity: rule.severity,
+                    layer_index: Some(layer.index),
+                    measured: Some(radius),
+                    required: Some(limits.corner_radius_mm),
+                    unit: Unit::Mm,
+                    count: 1,
+                    headline: format!(
+                        "Слой {} «{}»: кривая уже минимального радиуса {}.",
+                        layer.index,
+                        layer.name,
+                        format_measurement(radius, limits.corner_radius_mm)
+                    ),
+                    reason: rule.reason.to_string(),
+                    actions: vec![
+                        Action {
+                            id: "widen_curve".into(),
+                            label: "Увеличить радиус".into(),
+                            primary: true,
+                            estimated_fidelity_loss: Some(0.005),
+                        },
+                        Action {
+                            id: "show_elements".into(),
+                            label: "Показать элементы".into(),
+                            primary: false,
+                            estimated_fidelity_loss: None,
+                        },
+                    ],
+                });
+            }
+        }
+    }
+
+    // peelability (T-11) — not modelled, and the rule exists to say so.
+    //
+    // Peelability is not a geometric threshold. Whether a feature survives being
+    // removed depends on the film, the adhesive and the angle the operator pulls
+    // at, and the only real number available is `peel_angle_min_deg`, which comes
+    // from a physical test on a real sheet. Nothing in the geometry can be compared
+    // against it that would mean anything.
+    //
+    // What geometry does cover is already checked: a feature too thin to hold is
+    // T-01, too little of it to stay put is T-03, and one that will fall off is
+    // T-04. So this note is not covering a gap — it is saying the remaining
+    // physics is a procedure, not a measurement.
+    //
+    // One thing it does check: that the profile's peel rate is one this build can
+    // interpret. A value nobody recognises means the declared behaviour is not
+    // being applied, which would silently weaken every future check here.
+    if let Some(rule) = rules.rule("peelability") {
+        let known = matches!(
+            profile.limits.peel_rate.as_str(),
+            "slow" | "moderate" | "fast"
+        );
+        if known {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: Severity::Info,
+                layer_index: None,
+                measured: None,
+                required: Some(profile.limits.line_width_mm),
+                unit: Unit::Mm,
+                count: 0,
+                headline: "Снятие не смоделировано: это процедура, а не измерение.".into(),
+                reason: format!(
+                    "Плёнка снимается под углом не менее {}° со скоростью {}. Геометрия проверяется через ширину (T-01) и островки (T-03).",
+                    profile.limits.peel_angle_min_deg, profile.limits.peel_rate
+                ),
+                actions: vec![Action { id: "acknowledge".into(), label: "Понятно".into(), primary: false, estimated_fidelity_loss: None }],
+            });
+        } else {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: Severity::Warning,
+                layer_index: None,
+                measured: None,
+                required: Some(profile.limits.line_width_mm),
+                unit: Unit::Mm,
+                count: 0,
+                headline: format!(
+                    "Скорость снятия «{}» этой сборке неизвестна.",
+                    profile.limits.peel_rate
+                ),
+                reason: "Заявленное поведение плёнки не будет применено: снятие и так не смоделировано, а теперь даже его параметры прочитать нельзя.".into(),
+                actions: vec![Action { id: "review_profile".into(), label: "Проверить профиль материала".into(), primary: true, estimated_fidelity_loss: None }],
+            });
+        }
+    }
 
     // min_line_width — the rule that matters most for physical survival.
     if let (Some(rule), Some(width)) = (rules.rule("min_line_width"), metrics.min_width_mm) {
@@ -1366,6 +1412,7 @@ pub fn layer_from_contours(index: u32, name: &str, contours: Vec<Vec<[f64; 2]>>)
             let outer = Contour {
                 points: pts.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
                 closed: true,
+                arcs: Vec::new(),
             };
             Shape::new(outer)
         })
@@ -1532,6 +1579,7 @@ mod tests {
                         Point { x, y: 5.0 },
                     ],
                     closed: true,
+                    arcs: Vec::new(),
                 })
             })
             .collect();
@@ -1660,6 +1708,7 @@ mod tests {
                 Point { x: 10.0, y: 12.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         LayerInput {
             index,
@@ -1780,42 +1829,6 @@ mod tests {
     }
 
     #[test]
-    fn the_corner_radius_note_says_what_is_actually_checked() {
-        // The old note said only "not measured yet", which left the operator
-        // without knowing the angle was being checked instead.
-        let report = run(vec![spike_layer(1, 18.9)]);
-        let note = report
-            .violations
-            .iter()
-            .find(|v| v.code == "corner_radius")
-            .expect("the applicability note");
-        assert!(note.reason.contains("min_angle"), "{}", note.reason);
-        assert_eq!(note.severity, Severity::Info);
-    }
-
-    /// A bow tie: the classic crossed contour.
-    fn bowtie_layer(index: u32) -> LayerInput {
-        let contour = Contour {
-            points: vec![
-                Point { x: 0.0, y: 0.0 },
-                Point { x: 20.0, y: 20.0 },
-                Point { x: 20.0, y: 0.0 },
-                Point { x: 0.0, y: 20.0 },
-            ],
-            closed: true,
-        };
-        LayerInput {
-            index,
-            name: format!("Layer {index}"),
-            geometry: Shapes {
-                shapes: vec![Shape::new(contour)],
-            },
-            bridges: Vec::new(),
-            application_order: None,
-        }
-    }
-
-    #[test]
     fn a_self_crossing_contour_is_an_error_not_a_warning() {
         // The distinction matters: the geometry is not measurable at all, so a
         // verdict that let it through would be reporting on something undefined.
@@ -1897,6 +1910,7 @@ mod tests {
                 Point { x: 20.0, y: 20.0 },
             ],
             closed: false,
+            arcs: Vec::new(),
         };
         let layer = LayerInput {
             index: 1,
@@ -1951,6 +1965,7 @@ mod tests {
                         Point { x, y: side },
                     ],
                     closed: true,
+                    arcs: Vec::new(),
                 })
             })
             .collect();
@@ -2085,6 +2100,7 @@ mod tests {
                     Point { x: 0.0, y: 20.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             },
             vec![Contour {
                 points: vec![
@@ -2094,6 +2110,7 @@ mod tests {
                     Point { x: 15.0, y: 5.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }],
         );
         let island = Shape::new(Contour {
@@ -2104,6 +2121,7 @@ mod tests {
                 Point { x: 8.0, y: 12.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         });
         let before = Shapes {
             shapes: vec![frame, island],
@@ -2185,6 +2203,7 @@ mod tests {
                 Point { x: 0.0, y: 20.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         LayerInput {
             index,
@@ -2546,6 +2565,7 @@ mod tests {
                         Point { x, y: 20.0 },
                     ],
                     closed: true,
+                    arcs: Vec::new(),
                 })],
             },
             bridges: Vec::new(),
@@ -2687,6 +2707,7 @@ mod tests {
                     Point { x: 0.0, y: 20.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             },
             vec![Contour {
                 points: vec![
@@ -2696,6 +2717,7 @@ mod tests {
                     Point { x: 5.0, y: 15.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }],
         );
         let patch = Shape::new(Contour {
@@ -2706,6 +2728,7 @@ mod tests {
                 Point { x: 8.0, y: 12.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         });
         let layer = LayerInput {
             index: 1,
@@ -2739,6 +2762,7 @@ mod tests {
                     Point { x: 0.0, y: 20.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             },
             vec![Contour {
                 points: vec![
@@ -2748,6 +2772,7 @@ mod tests {
                     Point { x: 5.0, y: 15.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }],
         );
         let bridged = Shape::new(Contour {
@@ -2758,6 +2783,7 @@ mod tests {
                 Point { x: 8.0, y: 12.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         });
         let merged = mask_kernel::union(
             &Shapes {
@@ -2798,5 +2824,84 @@ mod tests {
     fn validation_is_deterministic() {
         let layers = vec![band_layer(1, 0.42, 200.0), band_layer(2, 0.80, 200.0)];
         assert_eq!(run(layers.clone()), run(layers));
+    }
+    fn bowtie_layer(index: u32) -> LayerInput {
+        let contour = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 20.0 },
+                Point { x: 20.0, y: 0.0 },
+                Point { x: 0.0, y: 20.0 },
+            ],
+            closed: true,
+            arcs: Vec::new(),
+        };
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(contour)],
+            },
+            bridges: Vec::new(),
+            application_order: None,
+        }
+    }
+
+    /// A layer carrying a circle of the given radius.
+    fn curved_layer(index: u32, radius: f64) -> LayerInput {
+        let points: Vec<Point> = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (i as f64);
+                Point {
+                    x: radius * a.cos(),
+                    y: radius * a.sin(),
+                }
+            })
+            .collect();
+        let arcs = (0..4)
+            .map(|i| mask_kernel::ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius,
+                ccw: true,
+            })
+            .collect();
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(Contour {
+                    points,
+                    closed: true,
+                    arcs,
+                })],
+            },
+            bridges: Vec::new(),
+            application_order: None,
+        }
+    }
+
+    #[test]
+    fn a_curve_below_the_minimum_radius_fails_t05() {
+        let report = run(vec![curved_layer(1, 0.2)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "corner_radius")
+            .expect("a 0.2 mm curve must violate a 0.40 mm minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert!((v.measured.expect("measured") - 0.2).abs() < 1e-6);
+        assert_eq!(v.required, Some(0.40));
+    }
+
+    #[test]
+    fn a_curve_at_the_minimum_radius_passes() {
+        let report = run(vec![curved_layer(1, 0.8)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "corner_radius"),
+            "{:?}",
+            report.violations
+        );
     }
 }

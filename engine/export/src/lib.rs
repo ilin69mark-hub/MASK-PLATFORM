@@ -424,6 +424,7 @@ mod tests {
                 Point { x: 0.0, y: h },
             ],
             closed: true,
+            arcs: Vec::new(),
         }))
     }
 
@@ -500,6 +501,7 @@ mod tests {
                     Point { x: 0.0, y: 10.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             },
             vec![Contour {
                 points: vec![
@@ -509,6 +511,7 @@ mod tests {
                     Point { x: 3.0, y: 7.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }],
         ));
         let svg = to_svg(&with_hole, 1, "Base", &passing_report(), &ctx());
@@ -552,6 +555,7 @@ mod tests {
                     Point { x: 0.0, y: 5.0 },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             })) - 50.0)
                 .abs()
                 < 1e-9
@@ -641,6 +645,7 @@ mod tile_tests {
                 Point { x: 40.0, y: 70.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         }))
     }
 

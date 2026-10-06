@@ -83,10 +83,15 @@ fn from_shapes(raw: Vec<Vec<Vec<Pt>>>) -> Shapes {
                 let mut it = contours.into_iter().map(|pts| Contour {
                     points: pts.into_iter().map(|[x, y]| Point { x, y }).collect(),
                     closed: true,
+                    // The library hands back polygons. A curve has to be flattened
+                    // before it reaches here and never survives a boolean
+                    // operation.
+                    arcs: Vec::new(),
                 });
                 let outer = it.next().unwrap_or(Contour {
                     points: Vec::new(),
                     closed: true,
+                    arcs: Vec::new(),
                 });
                 Shape {
                     outer,

@@ -51,10 +51,12 @@ fn from_shapes(raw: Vec<Vec<Vec<Pt>>>) -> Shapes {
                 let mut it = contours.into_iter().map(|pts| Contour {
                     points: pts.into_iter().map(|[x, y]| Point { x, y }).collect(),
                     closed: true,
+                    arcs: Vec::new(),
                 });
                 let outer = it.next().unwrap_or(Contour {
                     points: Vec::new(),
                     closed: true,
+                    arcs: Vec::new(),
                 });
                 Shape {
                     outer,
@@ -311,6 +313,7 @@ mod tests {
         Shapes::single(Shape::new(Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
+            arcs: Vec::new(),
         }))
     }
 
@@ -352,15 +355,18 @@ mod tests {
                 Contour {
                     points: vec![p(0.0, 0.0), p(20.0, 0.0), p(20.0, 20.0), p(0.0, 20.0)],
                     closed: true,
+                    arcs: Vec::new(),
                 },
                 vec![Contour {
                     points: vec![p(5.0, 5.0), p(5.0, 15.0), p(15.0, 15.0), p(15.0, 5.0)],
                     closed: true,
+                    arcs: Vec::new(),
                 }],
             );
             let island = Shape::new(Contour {
                 points: vec![p(8.0, 8.0), p(12.0, 8.0), p(12.0, 12.0), p(8.0, 12.0)],
                 closed: true,
+                arcs: Vec::new(),
             });
             let before = Shapes {
                 shapes: vec![frame, island],
@@ -441,6 +447,7 @@ mod tests {
                 p(0.0, 4.0),
             ],
             closed: true,
+            arcs: Vec::new(),
         }));
         let measured = min_width(&band_with_whisker).expect("a width");
         assert!(

@@ -311,6 +311,9 @@ pub fn round_corners(
         *contour = Contour {
             points: dedupe(points, curve_tolerance_mm),
             closed: contour.closed,
+            // A fillet is emitted as segments, and the vertex indices the arcs were
+            // anchored to have shifted underneath them.
+            arcs: Vec::new(),
         };
     }
 
@@ -496,6 +499,7 @@ mod tests {
         Contour {
             points: pts,
             closed: true,
+            arcs: Vec::new(),
         }
     }
 

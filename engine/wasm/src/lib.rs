@@ -569,6 +569,7 @@ mod consistency_tests {
                 Point { x: 0.0, y: 5.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         });
         assert_eq!(result.path_data[0], server);
     }

@@ -198,6 +198,7 @@ mod tests {
         Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
+            arcs: Vec::new(),
         }
     }
 
@@ -205,6 +206,7 @@ mod tests {
         Contour {
             points: vec![p(x, y), p(x, y + h), p(x + w, y + h), p(x + w, y)],
             closed: true,
+            arcs: Vec::new(),
         }
     }
 
@@ -231,7 +233,8 @@ mod tests {
         assert!(
             signed_contour_area(&Contour {
                 points: vec![p(0.0, 0.0), p(1.0, 1.0)],
-                closed: false
+                closed: false,
+                arcs: Vec::new(),
             })
             .abs()
                 < MEASURE_EPS_MM
@@ -274,6 +277,38 @@ mod tests {
             "0.420 mm (минимум 0.800 mm)"
         );
     }
+}
+
+/// The narrowest curve anywhere in a set of shapes.
+///
+/// This is the measurement T-05 asks for, and it returns `None` for polygonal
+/// geometry — correctly, not as a gap. A polyline has no radius: its corners are
+/// infinitely sharp, so "minimum corner radius" would be zero everywhere and the
+/// check would fail on every shape for a reason that means nothing.
+///
+/// Once a contour carries arcs, the number exists, and this returns it.
+#[must_use]
+pub fn min_corner_radius(shapes: &Shapes) -> Option<f64> {
+    shapes
+        .shapes
+        .iter()
+        .flat_map(|s| s.contours())
+        .filter_map(Contour::min_arc_radius)
+        .fold(None, |acc: Option<f64>, r| {
+            Some(acc.map_or(r, |acc: f64| acc.min(r)))
+        })
+}
+
+/// Whether any contour in the set carries a curve.
+///
+/// Lets the validator say "T-05 does not apply here" as a fact about the geometry
+/// rather than an assumption about it.
+#[must_use]
+pub fn has_curves(shapes: &Shapes) -> bool {
+    shapes
+        .shapes
+        .iter()
+        .any(|s| s.contours().any(Contour::has_arcs))
 }
 
 /// Ray-casting point-in-contour test.
@@ -404,6 +439,7 @@ mod island_tests {
         Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
+            arcs: Vec::new(),
         }
     }
 
@@ -420,6 +456,7 @@ mod island_tests {
                 Point { x: 0.4, y: 0.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         };
         // The closing edge is from (0.4, 0) back to (0, 0): 0.4 mm.
         let shortest = shortest_edge(&contour).expect("edges");
@@ -438,6 +475,7 @@ mod island_tests {
                 Point { x: 10.0, y: 10.0 },
             ],
             closed: false,
+            arcs: Vec::new(),
         };
         let shortest = shortest_edge(&contour).expect("edges");
         assert!(
@@ -451,14 +489,16 @@ mod island_tests {
         assert_eq!(
             shortest_edge(&Contour {
                 points: vec![],
-                closed: true
+                closed: true,
+                arcs: Vec::new(),
             }),
             None
         );
         assert_eq!(
             shortest_edge(&Contour {
                 points: vec![Point { x: 1.0, y: 1.0 }],
-                closed: true
+                closed: true,
+                arcs: Vec::new(),
             }),
             None
         );
@@ -476,6 +516,7 @@ mod island_tests {
                         Point { x: 0.0, y: 10.0 },
                     ],
                     closed: true,
+                    arcs: Vec::new(),
                 }),
                 Shape::new(Contour {
                     points: vec![
@@ -486,6 +527,7 @@ mod island_tests {
                         Point { x: 50.2, y: 10.0 },
                     ],
                     closed: true,
+                    arcs: Vec::new(),
                 }),
             ],
         };

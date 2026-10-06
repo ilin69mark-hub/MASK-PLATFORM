@@ -63,6 +63,10 @@ pub fn canonicalise(contour: &Contour) -> Contour {
     Contour {
         points,
         closed: contour.closed,
+        // Deduplication can remove a point an arc was anchored to, so a
+        // canonicalised contour drops its arcs rather than keeping references to
+        // indices that no longer mean what they meant.
+        arcs: Vec::new(),
     }
 }
 
@@ -154,6 +158,7 @@ mod tests {
         let contour = Contour {
             points: vec![p(0.0, 0.0), p(0.0, 0.0), p(1.0 / 3.0, 0.7), p(1.0, 0.0)],
             closed: true,
+            arcs: Vec::new(),
         };
         let once = canonicalise(&contour);
         let twice = canonicalise(&once);
@@ -167,10 +172,12 @@ mod tests {
         let a = Contour {
             points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 5.0), p(0.0, 5.0)],
             closed: true,
+            arcs: Vec::new(),
         };
         let b = Contour {
             points: vec![p(0.000_000_1, 0.0), p(10.0, 0.0), p(10.0, 5.0), p(0.0, 5.0)],
             closed: true,
+            arcs: Vec::new(),
         };
         assert_eq!(
             to_path_data(&canonicalise(&a)),
@@ -183,6 +190,7 @@ mod tests {
         let c = Contour {
             points: vec![p(0.5, 1.0), p(2.0, 1.0)],
             closed: true,
+            arcs: Vec::new(),
         };
         let data = to_path_data(&c);
         assert_eq!(data, "M 0.5000 1.0000 L 2.0000 1.0000 Z");
@@ -193,6 +201,7 @@ mod tests {
         let c = Contour {
             points: vec![p(0.0, 0.0), p(2.0, 1.0)],
             closed: false,
+            arcs: Vec::new(),
         };
         assert!(!to_path_data(&c).contains('Z'));
     }

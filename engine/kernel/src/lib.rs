@@ -30,13 +30,13 @@ pub use corner::{
     interior_angle, round_corners, sharp_corners, sharpest_corner, RoundReport, SharpCorner,
 };
 pub use gap::{gaps_per_region, min_gap, Gap};
-pub use geom::{Contour, GeometryError, Point, Shape, Shapes};
+pub use geom::{ArcSegment, Contour, GeometryError, Point, Shape, Shapes};
 pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
 pub use integrity::{open_cut_contours, self_intersections, OpenContour, SelfIntersection};
 pub use measure::{
-    bounding_box, contour_perimeter, format_area, format_degrees, format_measurement,
-    meets_threshold, point_in_contour, shape_area, shape_bounds, shapes_area, shortest_edge,
-    shortest_edge_in, signed_contour_area, unanchored_islands,
+    bounding_box, contour_perimeter, format_area, format_degrees, format_measurement, has_curves,
+    meets_threshold, min_corner_radius, point_in_contour, shape_area, shape_bounds, shapes_area,
+    shortest_edge, shortest_edge_in, signed_contour_area, unanchored_islands,
 };
 pub use offset::{
     lib_math_mode, min_width, narrowest_neck, offset_shape, survives_inward_offset, widen,

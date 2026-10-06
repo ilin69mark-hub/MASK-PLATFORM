@@ -370,6 +370,7 @@ fn check_source_integrity(fixture: &Fixture) -> Result<(), Vec<String>> {
                     .map(|[x, y]| Point { x: *x, y: *y })
                     .collect(),
                 closed: true,
+                arcs: Vec::new(),
             };
             let mut shape = mask_kernel::Shape::new(outer);
             shape.holes = region
@@ -378,6 +379,7 @@ fn check_source_integrity(fixture: &Fixture) -> Result<(), Vec<String>> {
                 .map(|h| Contour {
                     points: h.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
                     closed: true,
+                    arcs: Vec::new(),
                 })
                 .collect();
             shapes.push(shape);
@@ -420,6 +422,7 @@ fn region_to_shape(region: &FixtureRegion) -> Result<Shape, String> {
         Ok(Contour {
             points: points.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
             closed: true,
+            arcs: Vec::new(),
         })
     }
 

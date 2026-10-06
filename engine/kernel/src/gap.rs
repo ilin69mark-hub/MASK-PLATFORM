@@ -294,6 +294,7 @@ mod tests {
         Shape::new(Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
+            arcs: Vec::new(),
         })
     }
 
@@ -449,6 +450,7 @@ mod tests {
         let triangle = Shape::new(Contour {
             points: vec![p(0.0, 0.0), p(30.0, 0.0), p(0.0, 30.0)],
             closed: true,
+            arcs: Vec::new(),
         });
         // x + y spans 24..28 on this square, all under 30, so it is inside.
         let gap = min_gap(&layer(vec![triangle, rect(12.0, 12.0, 2.0, 2.0)])).expect("a gap");
@@ -463,6 +465,7 @@ mod tests {
         let triangle = Shape::new(Contour {
             points: vec![p(0.0, 0.0), p(30.0, 0.0), p(0.0, 30.0)],
             closed: true,
+            arcs: Vec::new(),
         });
         // The square's near corner is (20, 14): x + y = 34, so it is 4 mm outside
         // the line x + y = 30, which is 4 / sqrt(2) mm of perpendicular distance.

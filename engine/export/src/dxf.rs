@@ -309,7 +309,11 @@ pub fn from_dxf(text: &str) -> Result<DxfContent, String> {
                         }
                     }
                     if points.len() >= 2 {
-                        target.shapes.push(Shape::new(Contour { points, closed }));
+                        target.shapes.push(Shape::new(Contour {
+                            points,
+                            closed,
+                            arcs: Vec::new(),
+                        }));
                     }
                 }
                 "ENDSEC" => mode = Mode::Idle,
@@ -350,10 +354,12 @@ mod tests {
             cut: Shapes::single(Shape::new(Contour {
                 points: vec![p(0.0, 0.0), p(100.0, 0.0), p(100.0, 50.0), p(0.0, 50.0)],
                 closed: true,
+                arcs: Vec::new(),
             })),
             registration: Shapes::single(Shape::new(Contour {
                 points: vec![p(10.0, 10.0), p(90.0, 10.0), p(90.0, 40.0)],
                 closed: true,
+                arcs: Vec::new(),
             })),
         }
     }
@@ -451,6 +457,7 @@ mod tests {
             cut: Shapes::single(Shape::new(Contour {
                 points: vec![p(0.0, 0.0), p(0.001, 0.0), p(100.0, 0.0), p(100.0, 50.0)],
                 closed: true,
+                arcs: Vec::new(),
             })),
             registration: Shapes::default(),
         };

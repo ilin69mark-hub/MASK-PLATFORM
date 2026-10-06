@@ -120,6 +120,7 @@ mod tests {
         Shapes::single(Shape::new(Contour {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
+            arcs: Vec::new(),
         }))
     }
 
@@ -166,10 +167,12 @@ mod tests {
         two.shapes.push(Shape::new(Contour {
             points: vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)],
             closed: true,
+            arcs: Vec::new(),
         }));
         two.shapes.push(Shape::new(Contour {
             points: vec![p(5.0, 0.0), p(6.0, 0.0), p(6.0, 1.0)],
             closed: true,
+            arcs: Vec::new(),
         }));
         let a = ContentHash::of(&two);
         two.shapes.reverse();

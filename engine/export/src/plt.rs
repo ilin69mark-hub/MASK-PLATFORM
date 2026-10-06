@@ -237,16 +237,19 @@ mod tests {
                     Shape::new(Contour {
                         points: vec![p(0.0, 0.0), p(100.0, 0.0), p(100.0, 50.0)],
                         closed: false,
+                        arcs: Vec::new(),
                     }),
                     Shape::new(Contour {
                         points: vec![p(10.0, 10.0), p(40.0, 10.0), p(40.0, 30.0)],
                         closed: false,
+                        arcs: Vec::new(),
                     }),
                 ],
             },
             registration: Shapes::single(Shape::new(Contour {
                 points: vec![p(5.0, 5.0), p(95.0, 5.0)],
                 closed: false,
+                arcs: Vec::new(),
             })),
         }
     }
@@ -301,6 +304,7 @@ mod tests {
             cut: Shapes::single(Shape::new(Contour {
                 points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)],
                 closed: true,
+                arcs: Vec::new(),
             })),
             registration: Shapes::default(),
         };

@@ -255,6 +255,7 @@ fn simplify_contour(contour: &mask_kernel::Contour, epsilon: f64) -> mask_kernel
     mask_kernel::Contour {
         points,
         closed: true,
+        arcs: Vec::new(),
     }
 }
 

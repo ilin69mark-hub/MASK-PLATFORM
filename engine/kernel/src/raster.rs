@@ -414,6 +414,7 @@ fn to_shapes(contours: &[Vec<[f64; 2]>], scale: f64) -> Shapes {
 
     for (_, contour) in ordered {
         let candidate = Contour {
+            arcs: Vec::new(),
             points: contour
                 .iter()
                 .map(|[x, y]| Point {
@@ -822,10 +823,12 @@ mod tests {
                 Shape::new(Contour {
                     points: vec![p(0.0, 0.0), p(50.0, 0.0), p(50.0, 50.0), p(0.0, 50.0)],
                     closed: true,
+                    arcs: Vec::new(),
                 }),
                 Shape::new(Contour {
                     points: vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)],
                     closed: true,
+                    arcs: Vec::new(),
                 }),
             ],
         };

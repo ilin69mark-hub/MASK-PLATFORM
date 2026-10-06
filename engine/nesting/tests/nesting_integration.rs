@@ -64,6 +64,7 @@ fn every_tile_content_fits_inside_the_machine_field() {
     let frame = mask_kernel::Shapes::single(mask_kernel::Shape::new(mask_kernel::Contour {
         points: vec![p(0.0, 0.0), p(900.0, 0.0), p(900.0, 1500.0), p(0.0, 1500.0)],
         closed: true,
+        arcs: Vec::new(),
     }));
     let plan = fixed_grid(&frame, request()).unwrap();
     assert!(needs_nesting(&frame, request()));

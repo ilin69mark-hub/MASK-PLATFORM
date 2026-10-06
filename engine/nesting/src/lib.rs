@@ -214,6 +214,7 @@ pub fn fixed_grid(layer: &Shapes, request: NestRequest) -> Result<NestingPlan, N
                     },
                 ],
                 closed: true,
+                arcs: Vec::new(),
             }));
 
             let content =
@@ -452,6 +453,7 @@ mod tests {
                 Point { x: 0.0, y: 1500.0 },
             ],
             closed: true,
+            arcs: Vec::new(),
         }));
         let plan = fixed_grid(&frame, request()).unwrap();
         assert_eq!(
@@ -506,6 +508,7 @@ mod tests {
                 },
             ],
             closed: true,
+            arcs: Vec::new(),
         }));
         assert!(matches!(
             fixed_grid(&absurd, request()),
