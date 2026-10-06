@@ -302,6 +302,15 @@ impl RuleSet {
                 reason: "При снятии маски островок выпадет и повредит деталь.".into(),
             },
             Rule {
+                code: "crossing".into(),
+                severity: Severity::Error,
+                measure: Measure::MinGap,
+                auto_fixable: false,
+                threshold: "gap_mm".into(),
+                headline: "{n} пересечений слоёв без порядка нанесения.".into(),
+                reason: "В стопке плёнки два слоя в одном месте: без порядка нанесения краска ляжет неоднозначно.".into(),
+            },
+            Rule {
                 code: "peelability".into(),
                 severity: Severity::Warning,
                 measure: Measure::MinGap,

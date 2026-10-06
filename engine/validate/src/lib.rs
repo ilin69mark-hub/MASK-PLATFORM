@@ -11,9 +11,10 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, format_area, format_degrees, format_measurement, meets_threshold, min_gap,
-    min_width, narrowest_neck, open_cut_contours, self_intersections, shape_area, shapes_area,
-    sharp_corners, shortest_edge_in, unanchored_islands, Contour, Point, Shape, Shapes,
+    bounding_box, format_area, format_degrees, format_measurement, intersection, meets_threshold,
+    min_gap, min_width, narrowest_neck, open_cut_contours, self_intersections, shape_area,
+    shapes_area, sharp_corners, shortest_edge_in, unanchored_islands, Contour, Point, Shape,
+    Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,16 @@ pub struct LayerInput {
     pub index: u32,
     pub name: String,
     pub geometry: Shapes,
+    /// Position in the paint sequence.
+    ///
+    /// A mask layer is one sheet of film, and layers are applied one after
+    /// another. Where two of them overlap, that order decides which is on top —
+    /// it is the whole resolution of a crossing in this manufacturing mode.
+    ///
+    /// `None` means "use the layer index", so a fixture that does not think about
+    /// stacking still gets a defined order rather than a gap.
+    #[serde(default)]
+    pub application_order: Option<u32>,
     /// Tabs deliberately added to hold unanchored islands.
     ///
     /// Without this list a bridge is indistinguishable from any other part of the
@@ -475,6 +486,57 @@ pub fn validate_with_registration(
         }
     }
 
+    // crossing (T-12) — where two layers overlap, the paint order decides which
+    // one is on top.
+    //
+    // The rule is written in the docs as "no crossings without a cutout in the
+    // lower layer". That belongs to a single-sheet stencil, which this project does
+    // not produce: each layer is one sheet of film and layers are applied in
+    // sequence. Here the resolution is the order, not a hole, and this checks
+    // that the order is actually defined.
+    if let Some(rule) = rules.rule("crossing") {
+        let unresolved: Vec<(usize, usize, f64)> = layer_crossings(layers)
+            .into_iter()
+            .filter(|(i, j, _)| application_order(&layers[*i]) == application_order(&layers[*j]))
+            .collect();
+
+        if !unresolved.is_empty() {
+            let (a, b, area) = unresolved[0];
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: None,
+                measured: Some(area),
+                required: None,
+                unit: Unit::Mm2,
+                count: unresolved.len(),
+                headline: format!(
+                    "Слои {} «{}» и {} «{}» перекрываются на {} мм² без разного порядка нанесения.",
+                    layers[a].index,
+                    layers[a].name,
+                    layers[b].index,
+                    layers[b].name,
+                    mask_kernel::report(area)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    Action {
+                        id: "set_order".into(),
+                        label: "Задать порядок нанесения".into(),
+                        primary: true,
+                        estimated_fidelity_loss: None,
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
     finish(violations, metrics, None, limits_physically_verified)
 }
 
@@ -561,6 +623,39 @@ fn density_per_100cm2(shapes: &Shapes) -> f64 {
 
 /// A tile bounding box as `[min_x, min_y, width, height]`.
 pub type Rect4 = [f64; 4];
+
+/// The effective application order of a layer.
+#[must_use]
+fn application_order(layer: &LayerInput) -> u32 {
+    layer.application_order.unwrap_or(layer.index)
+}
+
+/// Where two layers' geometry overlaps, if it does.
+///
+/// The overlap is real film on real film. In this manufacturing mode it is
+/// resolved by which layer is applied first, not by cutting a hole — a cutout in
+/// the lower layer would belong to a single-sheet stencil, which this project does
+/// not produce.
+fn layer_crossings(layers: &[LayerInput]) -> Vec<(usize, usize, f64)> {
+    let mut out = Vec::new();
+    for i in 0..layers.len() {
+        for j in (i + 1)..layers.len() {
+            // Every overlap is reported; deciding which ones are unresolved is the
+            // caller's job. Filtering here and again at the call site made the
+            // check vacuously empty.
+            if let Ok(overlap) = intersection(&layers[i].geometry, &layers[j].geometry) {
+                let area = shapes_area(&overlap).abs();
+                if area > GEOM_AREA_EPS_MM2 {
+                    out.push((i, j, area));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Overlap below this is numerical noise from the boolean library, not film.
+const GEOM_AREA_EPS_MM2: f64 = 1e-9;
 
 /// The largest distance between any two layers' registration anchors.
 ///
@@ -1280,6 +1375,7 @@ pub fn layer_from_contours(index: u32, name: &str, contours: Vec<Vec<[f64; 2]>>)
         name: name.to_string(),
         geometry: Shapes { shapes },
         bridges: Vec::new(),
+        application_order: None,
     }
 }
 
@@ -1368,6 +1464,7 @@ mod tests {
             name: format!("Layer {index}"),
             geometry: widen(&line, width).unwrap(),
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -1443,6 +1540,7 @@ mod tests {
             name: format!("Layer {index}"),
             geometry: Shapes { shapes },
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -1570,6 +1668,7 @@ mod tests {
                 shapes: vec![Shape::new(contour)],
             },
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -1712,6 +1811,7 @@ mod tests {
                 shapes: vec![Shape::new(contour)],
             },
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -1805,6 +1905,7 @@ mod tests {
                 shapes: vec![Shape::new(open)],
             },
             bridges: Vec::new(),
+            application_order: None,
         };
         let report = run(vec![layer]);
         let v = report
@@ -1858,6 +1959,7 @@ mod tests {
             name: format!("Layer {index}"),
             geometry: Shapes { shapes },
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -2019,6 +2121,7 @@ mod tests {
             name: format!("Layer {index}"),
             geometry: joined,
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -2090,6 +2193,7 @@ mod tests {
                 shapes: vec![Shape::new(contour)],
             },
             bridges: Vec::new(),
+            application_order: None,
         }
     }
 
@@ -2177,6 +2281,7 @@ mod tests {
                 length_mm,
                 at: Point { x: 10.0, y: 0.0 },
             }],
+            application_order: None,
         }
     }
 
@@ -2421,6 +2526,94 @@ mod tests {
         }
     }
 
+    /// Two square layers at a given offset, with a chosen application order.
+    fn stacked_layers(order_a: Option<u32>, order_b: Option<u32>) -> Vec<LayerInput> {
+        let square_at = |index: u32, x: f64, order: Option<u32>| LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(Contour {
+                    points: vec![
+                        Point { x, y: 0.0 },
+                        Point {
+                            x: x + 20.0,
+                            y: 0.0,
+                        },
+                        Point {
+                            x: x + 20.0,
+                            y: 20.0,
+                        },
+                        Point { x, y: 20.0 },
+                    ],
+                    closed: true,
+                })],
+            },
+            bridges: Vec::new(),
+            application_order: order,
+        };
+        vec![square_at(1, 0.0, order_a), square_at(2, 10.0, order_b)]
+    }
+
+    #[test]
+    fn overlapping_layers_with_the_same_explicit_order_are_reported() {
+        // Two 20 mm squares offset by 10, both claiming to be seventh.
+        let report = run(stacked_layers(Some(7), Some(7)));
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "crossing")
+            .expect("an explicit order collision must be reported");
+        assert_eq!(v.severity, Severity::Error);
+        assert!(
+            v.measured.expect("measured") > 0.0,
+            "the overlap area should be given"
+        );
+        assert!(
+            v.headline.contains('1') && v.headline.contains('2'),
+            "{}",
+            v.headline
+        );
+        assert!(matches!(report.verdict, Verdict::Fail));
+    }
+
+    #[test]
+    fn overlapping_layers_with_a_distinct_order_are_resolved() {
+        // This is the point: in a stack of films, the order is the resolution.
+        // Nothing is cut out, and nothing needs to be.
+        let report = run(stacked_layers(Some(1), Some(2)));
+        assert!(
+            !report.violations.iter().any(|v| v.code == "crossing"),
+            "a defined order resolves the crossing: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn layers_that_do_not_overlap_are_silent_whatever_the_order() {
+        let mut layers = stacked_layers(None, None);
+        layers[1].geometry.shapes[0]
+            .outer
+            .points
+            .iter_mut()
+            .for_each(|p| p.x += 100.0);
+        let report = run(layers);
+        assert!(!report.violations.iter().any(|v| v.code == "crossing"));
+    }
+
+    #[test]
+    fn undeclared_order_falls_back_to_the_index_and_stays_quiet() {
+        // Layers are naturally applied in the order they are listed, so the index
+        // is a sensible default. The alternative — treating "not declared" as
+        // unknown — would fire on nearly every multi-layer mask, and noise is what
+        // made the old T-05 note worth keeping as an Info in the first place.
+        let report = run(stacked_layers(None, None));
+        assert!(
+            !report.violations.iter().any(|v| v.code == "crossing"),
+            "the index fallback already gives a distinct order: {:?}",
+            report.violations
+        );
+    }
+
     #[test]
     fn an_empty_project_is_fatal() {
         let report = run(vec![]);
@@ -2472,6 +2665,7 @@ mod tests {
             name: "hostile".into(),
             geometry: Shapes { shapes: vec![] },
             bridges: Vec::new(),
+            application_order: None,
         };
         let report = run(vec![hostile]);
         assert!(
@@ -2520,6 +2714,7 @@ mod tests {
                 shapes: vec![outer, patch],
             },
             bridges: Vec::new(),
+            application_order: None,
         };
         let report = run(vec![layer]);
         let v = report
@@ -2578,6 +2773,7 @@ mod tests {
             name: "Bridged".into(),
             geometry: merged,
             bridges: Vec::new(),
+            application_order: None,
         }]);
         assert!(
             !report

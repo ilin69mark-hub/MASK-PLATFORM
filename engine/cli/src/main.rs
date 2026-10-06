@@ -323,6 +323,10 @@ struct FixtureTarget {
 struct FixtureLayer {
     index: u32,
     name: String,
+    /// Position in the paint sequence. Defaults to `index`, so a fixture that never
+    /// thinks about stacking still gets a defined order.
+    #[serde(default)]
+    application_order: Option<u32>,
     #[serde(default = "default_width")]
     width_mm: f64,
     #[serde(default)]
@@ -485,6 +489,7 @@ fn build_layer(
             name: layer.name.clone(),
             geometry: merged,
             bridges: Vec::new(),
+            application_order: layer.application_order,
         });
     }
 
@@ -514,6 +519,7 @@ fn build_layer(
         name: layer.name.clone(),
         geometry: merged,
         bridges: Vec::new(),
+        application_order: layer.application_order,
     })
 }
 

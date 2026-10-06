@@ -355,6 +355,8 @@ fn extract_layers(value: &serde_json::Value) -> Result<Vec<LayerInput>, JsError>
             // facade has no tabs to record. The T-06 and T-07 numbers come from
             // the server, which does place them.
             bridges: Vec::new(),
+            // No paint order travels either: stacking is decided server-side.
+            application_order: None,
         });
     }
     Ok(out)

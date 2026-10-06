@@ -1,0 +1,72 @@
+{
+  "project_id": "MASK-CRS-001",
+  "revision": 1,
+  "target": {
+    "object": "Crossing probe",
+    "part": "Flat",
+    "part_code": "CRS",
+    "dimensions_mm": [
+      40.0,
+      40.0
+    ]
+  },
+  "_comment": "TEST X1. Two overlapping layers both declaring application_order 1. Expected: crossing error — the paint sequence is undefined. Removing the two application_order lines makes it pass, because the index fallback already orders them.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Under",
+      "application_order": 1,
+      "regions": [
+        {
+          "outer": [
+            [
+              5,
+              5
+            ],
+            [
+              25,
+              5
+            ],
+            [
+              25,
+              25
+            ],
+            [
+              5,
+              25
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "name": "Over",
+      "application_order": 1,
+      "regions": [
+        {
+          "outer": [
+            [
+              15,
+              15
+            ],
+            [
+              35,
+              15
+            ],
+            [
+              35,
+              35
+            ],
+            [
+              15,
+              35
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    }
+  ]
+}
