@@ -169,6 +169,32 @@ def main():
         manifest_schema, manifest, "malformed sha256 rejected",
         lambda d: d["artifacts"][0].update(sha256="not-a-hash"))
 
+    # An override must name what it overrode. A manifest that records "we exported
+    # anyway" without the codes is a manifest that has forgotten the only part a
+    # reader needs.
+    def override_without_codes(d):
+        d["validation"]["export_override"] = {
+            "reason": "because",
+            "verdict_at_export": "FAIL",
+            "warning": "not a production run",
+        }
+    passed &= check_rejects(
+        manifest_schema, manifest, "export_override without its codes rejected",
+        override_without_codes)
+
+    # An override cannot claim a passing verdict: that combination is exactly the
+    # "refused, but looks reviewed" state the field exists to prevent.
+    def override_claiming_pass(d):
+        d["validation"]["export_override"] = {
+            "reason": "because",
+            "codes": ["min_gap"],
+            "verdict_at_export": "PASS",
+            "warning": "not a production run",
+        }
+    passed &= check_rejects(
+        manifest_schema, manifest, "export_override claiming PASS rejected",
+        override_claiming_pass)
+
     # A proof claiming performed=true must carry a date.
     passed &= check_rejects(
         manifest_schema, manifest, "performed proof without date rejected",

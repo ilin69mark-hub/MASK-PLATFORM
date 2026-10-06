@@ -89,7 +89,46 @@ pub fn build_manifest(
     layers: &[LayerInput],
     artifacts: &[ArtifactRow],
 ) -> Value {
+    build_manifest_with_override(
+        project, material, plotter, cutting, report, layers, artifacts, None,
+    )
+}
+
+/// Build the manifest, optionally recording that a refusal was overridden.
+///
+/// The override cannot be inferred from the report: the verdict and the status are
+/// deliberately left alone, so a `FAIL` document stays a `FAIL` document and reads
+/// as `NeedsWork`. A manifest that quietly looked manufacturable would be worse
+/// than no manifest, because the whole reason these files exist is that somebody is
+/// about to put a knife to them.
+///
+/// Eight inputs, one of them the override that only a single caller supplies.
+// Bundling them into a struct would hide which arguments a caller actually has to
+// think about, and this function is read as one question: "what does a manifest for
+// this run say?".
+#[allow(clippy::too_many_arguments)]
+pub fn build_manifest_with_override(
+    project: &ProjectRef,
+    material: &MaterialProfile,
+    plotter: &PlotterProfile,
+    cutting: &CuttingProfile,
+    report: &ValidationReport,
+    layers: &[LayerInput],
+    artifacts: &[ArtifactRow],
+    // Rule codes the operator overrode, if any.
+    overridden_codes: Option<&[String]>,
+) -> Value {
     let limits = &cutting.limits;
+
+    let override_value = match overridden_codes {
+        None => Value::Null,
+        Some(codes) => json!({
+            "reason": "the validator refused this project and the files were produced anyway",
+            "codes": codes,
+            "verdict_at_export": verdict_str(report),
+            "warning": "NOT A PRODUCTION RUN. These artifacts exist to be cut by hand under observation.",
+        }),
+    };
 
     let layer_rows: Vec<Value> = layers
         .iter()
@@ -207,6 +246,11 @@ pub fn build_manifest(
                 "performed": false,
                 "notes": "Material not procured. Limits are datasheet values, not measurements.",
             },
+            // Present only when the export went ahead against the verdict above.
+            // Absent otherwise, so its presence is the signal — an explicit
+            // "override": false would be a field someone could set to make a
+            // refusing run look reviewed.
+            "export_override": override_value,
         },
         "lineage": {
             "engine_version": env!("CARGO_PKG_VERSION"),
@@ -324,6 +368,78 @@ mod tests {
         );
         assert_eq!(json["validation"]["physical_proof"]["performed"], false);
         assert_eq!(json["validation"]["verdict"], "PASS");
+    }
+
+    #[test]
+    fn an_override_keeps_the_failing_verdict_and_names_the_codes() {
+        // The point of the field: files that exist to be cut under observation must
+        // not read as a production run. The verdict stays FAIL, the status stays
+        // NeedsWork, and the codes are named so the refusal is readable from the
+        // manifest alone.
+        let report = ValidationReport {
+            verdict: mask_validate::Verdict::Fail,
+            counts: mask_validate::Counts {
+                fatal: 0,
+                error: 1,
+                warning: 0,
+                info: 0,
+            },
+            violations: vec![],
+            layers: vec![],
+            fidelity: None,
+            limits_physically_verified: false,
+        };
+        let codes = vec!["min_gap".to_string()];
+        let json = build_manifest_with_override(
+            &project_ref("MASK-000003"),
+            &material(),
+            &plotter(),
+            &CuttingProfile::derive(&material(), &plotter()),
+            &report,
+            &[],
+            &[],
+            Some(&codes),
+        );
+
+        assert_eq!(json["validation"]["verdict"], "FAIL");
+        assert_eq!(json["project"]["status"], "NeedsWork");
+        assert_eq!(json["validation"]["export_override"]["codes"][0], "min_gap");
+        assert_eq!(
+            json["validation"]["export_override"]["verdict_at_export"],
+            "FAIL"
+        );
+    }
+
+    #[test]
+    fn no_override_means_no_field_rather_than_a_false_one() {
+        // Presence is the signal. An explicit `false` would be a field someone
+        // could set to make a refusing run look reviewed.
+        let report = ValidationReport {
+            verdict: mask_validate::Verdict::Pass,
+            counts: mask_validate::Counts {
+                fatal: 0,
+                error: 0,
+                warning: 0,
+                info: 0,
+            },
+            violations: vec![],
+            layers: vec![],
+            fidelity: None,
+            limits_physically_verified: false,
+        };
+        let json = build_manifest(
+            &project_ref("MASK-000004"),
+            &material(),
+            &plotter(),
+            &CuttingProfile::derive(&material(), &plotter()),
+            &report,
+            &[],
+            &[],
+        );
+        assert!(
+            json["validation"]["export_override"].is_null(),
+            "an ordinary run must carry no override field"
+        );
     }
 
     #[test]

@@ -45,6 +45,12 @@ struct Args {
     bridge: bool,
     /// Fill in corners sharper than the material's minimum angle.
     round: bool,
+    /// Produce files for a project the validator refused.
+    ///
+    /// For the physical proof protocol only. The manifest still carries the failing
+    /// verdict and records which codes were overridden, so the output cannot be
+    /// mistaken for a production run.
+    export_anyway: bool,
 }
 
 fn main() -> ExitCode {
@@ -68,14 +74,25 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(&args) {
-        Ok(true) => ExitCode::SUCCESS,
+    let produced = match run(&args) {
+        Ok(manufacturable) => manufacturable,
         // A failing verdict is a legitimate outcome, not a tool failure.
-        Ok(false) => ExitCode::from(1),
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
+    };
+
+    // An override exit code is not a verdict. The run refused nothing and
+    // manufactured nothing, so a script cannot read success here as either — it
+    // has to look at the manifest, which says both.
+    if args.export_anyway && !produced {
+        return ExitCode::from(3);
+    }
+
+    match produced {
+        true => ExitCode::SUCCESS,
+        false => ExitCode::from(1),
     }
 }
 
@@ -234,6 +251,7 @@ fn parse_args() -> Result<Args, String> {
     let mut plotter = None;
     let mut out_dir = None;
     let mut widen_to = None;
+    let mut export_anyway = false;
     let mut nest = false;
     let mut bridge = false;
     let mut round = false;
@@ -253,6 +271,7 @@ fn parse_args() -> Result<Args, String> {
             "--material" => material = Some(PathBuf::from(take()?)),
             "--plotter" => plotter = Some(PathBuf::from(take()?)),
             "--out" => out_dir = Some(PathBuf::from(take()?)),
+            "--export-anyway" => export_anyway = true,
             "--widen-to" => {
                 let raw = take()?;
                 let value = raw
@@ -278,6 +297,7 @@ fn parse_args() -> Result<Args, String> {
         nest,
         bridge,
         round,
+        export_anyway,
     })
 }
 
@@ -286,7 +306,12 @@ fn usage() -> String {
 
 USAGE
   maskctl --fixture <file.json> --material <profile.json> \\
-          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest] [--bridge] [--round-corners]"
+          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest] [--bridge]
+          [--round-corners] [--export-anyway]
+
+--export-anyway is for the physical proof protocol only: it writes files for a
+project the validator refused, keeping the failing verdict in the manifest and
+naming the overridden codes. Never use it to ship a mask."
         .to_string()
 }
 
@@ -704,15 +729,47 @@ fn run(args: &Args) -> Result<bool, String> {
     };
 
     if !report.verdict.is_manufacturable() {
-        println!("Export skipped: the project is not manufacturable.");
-        for v in &report.violations {
-            if v.severity == mask_rules::Severity::Error
-                || v.severity == mask_rules::Severity::Fatal
-            {
+        let errors: Vec<&mask_validate::Violation> = report
+            .violations
+            .iter()
+            .filter(|v| {
+                v.severity == mask_rules::Severity::Error
+                    || v.severity == mask_rules::Severity::Fatal
+            })
+            .collect();
+
+        if !args.export_anyway {
+            println!("Export skipped: the project is not manufacturable.");
+            for v in &errors {
                 println!("   {}", v.headline);
             }
+            return Ok(false);
         }
-        return Ok(false);
+
+        // The physical proof protocol needs printable files for the cases the
+        // engine is *right* to refuse — T2, T4 and T6 exist precisely because they
+        // are supposed to fail. Without a way to export them, the protocol's
+        // instruction to cut them anyway is unfollowable.
+        //
+        // Lowering a threshold cannot reach all of them, which is why this is a
+        // flag and not a profile. An experimental profile fixes cases where a
+        // number was too strict; t6's gap is floored at kerf + registration by the
+        // rules engine and t4's unanchored island is a topological fact rather than
+        // a threshold, so no threshold makes either export. The refusal is correct
+        // in both cases and has to be overridden rather than edited away.
+        //
+        // Every artifact says so. The manifest keeps the failing verdict and the
+        // status stays `NeedsWork`, and a note records which codes were overridden:
+        // a file that looked like a production run would defeat the purpose.
+        println!(
+            "Export proceeding anyway (--export-anyway): {} blocking violation(s).",
+            errors.len()
+        );
+        for v in &errors {
+            println!("   overridden: {} — {}", v.code, v.headline);
+        }
+        println!("   The manifest keeps the failing verdict and names these codes.");
+        println!();
     }
     if units.iter().all(|u| u.geometry.is_empty()) {
         println!("Export skipped: no piece carries any geometry.");
@@ -809,7 +866,30 @@ fn run(args: &Args) -> Result<bool, String> {
             println!("  wrote {} ({} bytes)", path.display(), body.len());
         }
     }
-    let manifest_doc = manifest::build_manifest(
+    // Recorded so the manifest can name what was overridden.
+    //
+    // Keyed on whether anything was *actually* refused, not on the flag. With the
+    // flag set and nothing refused, the list is empty, and an empty list means "no
+    // override happened" — otherwise a passing project run with `--export-anyway`
+    // would write "the validator refused this project", which is a false statement
+    // in the one document whose whole purpose is to be believed.
+    let refused = !report.verdict.is_manufacturable();
+    let overridden: Vec<String> = if refused {
+        report
+            .violations
+            .iter()
+            .filter(|v| {
+                v.severity == mask_rules::Severity::Error
+                    || v.severity == mask_rules::Severity::Fatal
+            })
+            .map(|v| v.code.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let override_recorded = args.export_anyway && refused;
+
+    let manifest_doc = manifest::build_manifest_with_override(
         &manifest::ProjectRef {
             id: fixture.project_id.clone(),
             revision: fixture.revision,
@@ -834,6 +914,11 @@ fn run(args: &Args) -> Result<bool, String> {
                 tile: a.tile.clone(),
             })
             .collect::<Vec<_>>(),
+        if override_recorded {
+            Some(&overridden)
+        } else {
+            None
+        },
     );
     let manifest_json = serde_json::to_string_pretty(&manifest_doc)
         .map_err(|e| format!("cannot serialise manifest: {e}"))?;
@@ -862,6 +947,14 @@ fn run(args: &Args) -> Result<bool, String> {
     );
 
     println!();
+    if override_recorded {
+        println!(
+            "These files are NOT a production run: the validator refused this project.\n\
+             Print at 100%, cut by hand, and record what happens. See\n\
+             docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
+        );
+        return Ok(false);
+    }
     println!(
         "Next: print at 100%, then cut by hand. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
     );
@@ -1105,6 +1198,10 @@ mod fixture_expectations {
             nest: false,
             bridge: false,
             round: false,
+            // Expectations describe the design as written. An override would
+            // silently make a failing fixture export, which is exactly the
+            // substitution these fixtures exist to prevent.
+            export_anyway: false,
         }
     }
 
@@ -1139,6 +1236,98 @@ mod fixture_expectations {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// One violation, for the override test. Only the two fields that test reads are
+    /// interesting; the rest exist because `Violation` has no defaults.
+    fn violation(code: &str, severity: mask_rules::Severity) -> mask_validate::Violation {
+        mask_validate::Violation {
+            code: code.into(),
+            severity,
+            layer_index: None,
+            measured: None,
+            required: None,
+            unit: mask_validate::Unit::Mm,
+            count: 1,
+            headline: format!("{code} headline"),
+            reason: "because".into(),
+            actions: Vec::new(),
+        }
+    }
+
+    /// `--export-anyway` writes files for a project the validator refused.
+    ///
+    /// Asserted here rather than only in the manifest tests: this is the switch
+    /// that could let a failing project reach a knife, so what it must *not* do is
+    /// checkable without a bench.
+    #[test]
+    fn the_refusal_listed_for_override_is_the_one_that_blocks_export() {
+        // Two violations, one blocking. Only the blocking one may be reported as
+        // overridden: a manifest naming a warning as overridden would misdescribe
+        // what the operator actually bypassed.
+        let report = mask_validate::ValidationReport {
+            verdict: mask_validate::Verdict::Fail,
+            counts: mask_validate::Counts {
+                fatal: 0,
+                error: 1,
+                warning: 1,
+                info: 0,
+            },
+            violations: vec![
+                violation("min_gap", mask_rules::Severity::Error),
+                violation("min_feature_length", mask_rules::Severity::Warning),
+            ],
+            layers: vec![],
+            fidelity: None,
+            limits_physically_verified: false,
+        };
+
+        let codes: Vec<String> = report
+            .violations
+            .iter()
+            .filter(|v| {
+                v.severity == mask_rules::Severity::Error
+                    || v.severity == mask_rules::Severity::Fatal
+            })
+            .map(|v| v.code.clone())
+            .collect();
+
+        assert_eq!(codes, vec!["min_gap".to_string()]);
+        assert!(!report.verdict.is_manufacturable());
+    }
+
+    /// `--export-anyway` on a project that passes records nothing.
+    ///
+    /// The manifest is the document whose whole purpose is to be believed, so
+    /// writing "the validator refused this project" onto a `PASS_WITH_WARNINGS`
+    /// project because the flag was set is a false statement in exactly the place
+    /// nobody would look twice. The flag is inert when nothing was refused.
+    #[test]
+    fn the_flag_alone_never_marks_a_passing_project_as_refused() {
+        let passing = mask_validate::ValidationReport {
+            verdict: mask_validate::Verdict::PassWithWarnings,
+            counts: mask_validate::Counts {
+                fatal: 0,
+                error: 0,
+                warning: 1,
+                info: 0,
+            },
+            violations: vec![violation(
+                "min_feature_length",
+                mask_rules::Severity::Warning,
+            )],
+            layers: vec![],
+            fidelity: None,
+            limits_physically_verified: false,
+        };
+
+        // The same predicate the CLI uses to decide whether to record an override.
+        let refused = !passing.verdict.is_manufacturable();
+        let recorded = true /* --export-anyway */ && refused;
+        assert!(
+            !recorded,
+            "a passing project must carry no override, whatever the flag says"
+        );
     }
 
     /// Every fixture must do what its `_expect` block says.

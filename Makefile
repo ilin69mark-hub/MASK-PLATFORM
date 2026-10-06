@@ -9,6 +9,9 @@ SPIKE := $(ROOT)/spike/geometry-spike
 DOCS := $(ROOT)/docs
 # Absolute, because the recipes cd into the engine directory first.
 MATERIAL := $(ENGINE)/profiles/data/matte-vinyl-090.v4.json
+# The physical proof protocol needs printable files for the cases the engine is
+# right to refuse. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md §4.
+EXPERIMENTAL_MATERIAL := $(ENGINE)/profiles/data/matte-vinyl-090-experiment.v1.json
 PLOTTER := $(ENGINE)/profiles/data/knife-25mm.v2.json
 FIXTURE ?= $(ENGINE)/fixtures/proof_panel.json
 OUT ?= $(ENGINE)/out
@@ -89,6 +92,29 @@ demo: ## Generate masks for a fixture (override with FIXTURE=…)
 fixtures: ## Report every fixture against the verdict it declares
 	cd $(ENGINE) && $(CARGO) build -q -p mask-cli
 	@python3 $(ROOT)/tools/fixture_report.py $(ENGINE)
+
+.PHONY: physical
+physical: ## Print-ready files for every physical proof case, including the failing ones
+	@mkdir -p $(OUT)/physical
+	@cd $(ENGINE) && $(CARGO) build -q -p mask-cli
+	@for f in t1_at_threshold t2_below_threshold t3_island_bridged \
+	          t4_island_unbridged t5_six_layers t6_min_gap_violated t7_min_gap_ok; do \
+		cd $(ENGINE) && ./target/debug/maskctl \
+			--fixture fixtures/$$f.json \
+			--material $(MATERIAL) \
+			--plotter $(PLOTTER) \
+			--export-anyway \
+			--out $(OUT)/physical > /tmp/maskctl-physical-$$f.log 2>&1 || true; \
+		v=$$(grep -oE 'Verdict: [A-Za-z_]+' /tmp/maskctl-physical-$$f.log | head -1 | sed 's/Verdict: //'); \
+		n=$$(grep -c '\.svg (' /tmp/maskctl-physical-$$f.log || true); \
+		o=$$(grep -c 'overridden:' /tmp/maskctl-physical-$$f.log || true); \
+		printf "  %-24s %-20s %s SVG" "$$f" "$${v:-?}" "$$n"; \
+		if [ "$$o" -gt 0 ]; then printf "  (%s rule(s) overridden — NOT a production run)" "$$o"; fi; \
+		printf "\n"; \
+	done
+	@echo
+	@echo "Print at 100%. Do not scale: scaling changes the element width and voids the run."
+	@echo "Record what happens. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
 
 .PHONY: spike
 spike: ## Re-run the geometry acceptance probe behind ADR-0003
