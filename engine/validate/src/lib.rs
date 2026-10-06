@@ -11,8 +11,8 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, format_measurement, meets_threshold, min_gap, min_width, shapes_area,
-    unanchored_islands, Contour, Point, Shape, Shapes,
+    bounding_box, format_degrees, format_measurement, meets_threshold, min_gap, min_width,
+    shapes_area, sharp_corners, unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,13 @@ pub struct Violation {
     pub layer_index: Option<u32>,
     pub measured: Option<f64>,
     pub required: Option<f64>,
+    /// What the two numbers above are measured in.
+    ///
+    /// The renderer cannot assume millimetres: an angle check measured 18.9 and
+    /// the report told the operator it was 18.9 mm. A number with the wrong unit
+    /// is worse than no number, because it looks trustworthy.
+    #[serde(default = "default_unit")]
+    pub unit: Unit,
     pub count: usize,
     /// Short human-facing statement.
     pub headline: String,
@@ -39,6 +46,66 @@ pub struct Violation {
     pub reason: String,
     /// What the user can do about it.
     pub actions: Vec<Action>,
+}
+
+/// The unit a violation's measurements are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    /// Millimetres. The default, because nearly every rule measures a length.
+    #[default]
+    Mm,
+    /// Degrees.
+    Deg,
+}
+
+fn default_unit() -> Unit {
+    Unit::Mm
+}
+
+/// Russian plural forms for a counted noun.
+///
+/// "1 углов" is wrong in the first line the operator reads, and the whole
+/// message is about a measurement they are meant to trust. Rust's `{}` cannot do
+/// this, and hard-coding one form per violation is how "1 островков" appeared.
+pub(crate) fn plural<'a>(count: usize, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    let n = count % 100;
+    if (11..=14).contains(&n) {
+        return many;
+    }
+    match n % 10 {
+        1 => one,
+        2..=4 => few,
+        _ => many,
+    }
+}
+
+/// A noun phrase with its count, correctly inflected.
+pub(crate) fn counted(count: usize, one: &str, few: &str, many: &str) -> String {
+    format!("{} {}", count, plural(count, one, few, many))
+}
+
+/// The participle that agrees with the count.
+///
+/// "1 островок не соединены" is the same defect as "1 углов": the number and the
+/// word beside it contradict each other in the line the operator has to trust.
+pub(crate) fn agreeing<'a>(count: usize, singular: &'a str, plural_form: &'a str) -> &'a str {
+    let n = count % 100;
+    if (11..=14).contains(&n) || n % 10 != 1 {
+        plural_form
+    } else {
+        singular
+    }
+}
+
+impl Unit {
+    #[must_use]
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Unit::Mm => "мм",
+            Unit::Deg => "°",
+        }
+    }
 }
 
 /// Something the reader can do about a violation.
@@ -195,6 +262,7 @@ pub fn validate_with_nesting(
             layer_index: None,
             measured: None,
             required: None,
+            unit: Unit::Mm,
             count: 0,
             headline: "Проект не содержит ни одного слоя.".into(),
             reason: "Наложить маску нечем.".into(),
@@ -221,19 +289,25 @@ pub fn validate_with_nesting(
         metrics.push(measured);
     }
 
-    // Reported once per run rather than once per layer: the geometry spine
-    // stores polygonal contours, so corner radius cannot be measured yet.
-    // Repeating the same note for six layers would bury the real violations.
-    if let Some(rule) = rules.rule("corner_radius") {
+    // T-05 is stated as a radius and cannot be measured on polygonal contours:
+    // every vertex has radius zero, so the number is not in the geometry. Saying
+    // so once per run is right — six copies would bury the real violations.
+    //
+    // This is not replaced by T-14, it is the same requirement measured a way the
+    // geometry allows. `minimums.corner_radius_mm` is documented as "a sharp
+    // internal angle tears the film", so the angle is the requirement and the
+    // radius is only the shape of the fix.
+    if rules.rule("corner_radius").is_some() {
         violations.push(Violation {
-            code: rule.code.clone(),
+            code: "corner_radius".into(),
             severity: Severity::Info,
             layer_index: None,
             measured: None,
             required: Some(profile.limits.corner_radius_mm),
+            unit: Unit::Mm,
             count: 0,
-            headline: "Радиус углов пока не измеряется: контуры многоугольные.".into(),
-            reason: "Проверка заработает, когда геометрия будет хранить кривые.".into(),
+            headline: "Радиус углов не измеряется: контуры многоугольные.".into(),
+            reason: "Острый угол проверяется правилом min_angle. Радиус станет доступен, когда геометрия будет хранить кривые.".into(),
             actions: vec![Action {
                 id: "acknowledge".into(),
                 label: "Понятно".into(),
@@ -304,6 +378,7 @@ fn check_layer(
                 layer_index: Some(layer.index),
                 measured: Some(width),
                 required: Some(limits.line_width_mm),
+                unit: Unit::Mm,
                 count: 1,
                 headline: format!(
                     "Слой {} «{}»: элемент уже минимума.",
@@ -357,6 +432,7 @@ fn check_layer(
                         layer_index: Some(layer.index),
                         measured: Some(measured),
                         required: Some(required),
+                        unit: Unit::Mm,
                         count: offending,
                         headline: format!(
                             "Слой {}: {} из {} плиток не помещаются в рабочее поле.",
@@ -390,6 +466,7 @@ fn check_layer(
                         layer_index: Some(layer.index),
                         measured: Some(measured),
                         required: Some(required),
+                        unit: Unit::Mm,
                         count: 1,
                         headline: format!(
                             "Слой {} не помещается в рабочее поле: {:.1}×{:.1} мм при {:.1}×{:.1} мм.",
@@ -428,6 +505,7 @@ fn check_layer(
                     layer_index: Some(layer.index),
                     measured: Some(gap.mm),
                     required: Some(limits.gap_mm),
+                    unit: Unit::Mm,
                     count: 1,
                     // format_measurement already carries both numbers and the
                     // word «минимум», so appending it again produced
@@ -466,6 +544,49 @@ fn check_layer(
         }
     }
 
+    // min_angle (T-14) — an interior angle below the material's minimum
+    // concentrates stress in the film and tears it.
+    if let Some(rule) = rules.rule("min_angle") {
+        let sharp = sharp_corners(&layer.geometry, limits.min_angle_deg);
+        if !sharp.is_empty() {
+            let worst = sharp
+                .iter()
+                .map(|c| c.angle_deg)
+                .fold(f64::INFINITY, f64::min);
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(worst),
+                required: Some(limits.min_angle_deg),
+                unit: Unit::Deg,
+                count: sharp.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} острее {}.",
+                    layer.index,
+                    layer.name,
+                    counted(sharp.len(), "угол", "угла", "углов"),
+                    format_degrees(worst, limits.min_angle_deg)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    Action {
+                        id: "round_corners".into(),
+                        label: "Скруглить углы".into(),
+                        primary: true,
+                        estimated_fidelity_loss: Some(0.005),
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
     // island_anchored — a region nested inside another region's hole cannot be
     // applied as a separate piece and must be held by a bridge.
     //
@@ -480,12 +601,14 @@ fn check_layer(
                 layer_index: Some(layer.index),
                 measured: None,
                 required: Some(limits.line_width_mm),
+                unit: Unit::Mm,
                 count: islands.len(),
                 headline: format!(
-                    "Слой {} «{}»: {} островков не соединены с маской.",
+                    "Слой {} «{}»: {} {} с маской.",
                     layer.index,
                     layer.name,
-                    islands.len()
+                    counted(islands.len(), "островок", "островка", "островков"),
+                    agreeing(islands.len(), "не соединён", "не соединены")
                 ),
                 reason: "При снятии маски островок выпадет и повредит деталь.".into(),
                 actions: vec![
@@ -573,11 +696,18 @@ pub fn render(report: &ValidationReport) -> String {
         };
         out.push(format!("{mark} {}", v.headline));
         if let (Some(m), Some(r)) = (v.measured, v.required) {
-            out.push(format!(
-                "   измерено {:.3} мм, требуется {:.3} мм",
-                mask_kernel::report(m),
-                mask_kernel::report(r)
-            ));
+            // An angle gets one decimal and a degree sign; a length gets the
+            // canonical three (ADR-0004). Printing an angle as millimetres was a
+            // real bug: "18.925 mm" for a 19° corner.
+            let (m, r, suffix) = match v.unit {
+                Unit::Mm => (
+                    format!("{:.3}", mask_kernel::report(m)),
+                    format!("{:.3}", mask_kernel::report(r)),
+                    v.unit.suffix(),
+                ),
+                Unit::Deg => (format!("{m:.1}"), format!("{r:.1}"), v.unit.suffix()),
+            };
+            out.push(format!("   измерено {m} {suffix}, требуется {r} {suffix}"));
         }
         out.push(format!("   Почему это важно: {}", v.reason));
         let buttons: Vec<String> = v.actions.iter().map(|a| a.label.clone()).collect();
@@ -865,6 +995,163 @@ mod tests {
             .find(|v| v.code == "min_gap")
             .expect("touching film merges during weeding");
         assert!(v.measured.expect("measured") < 1e-6, "got {:?}", v.measured);
+    }
+
+    /// A traced figure with a spike whose top vertex is `angle_deg`.
+    fn spike_layer(index: u32, angle_deg: f64) -> LayerInput {
+        // The apex sits 14 mm above the shoulders of the spike, so the half-angle
+        // is atan(w / 14). Using the wrong vertical here silently produces a
+        // polygon that is not the angle it claims — which is exactly what the first
+        // version of this helper did, and the test failed for the right reason.
+        let half = angle_deg.to_radians() / 2.0;
+        let w = 14.0 * half.tan();
+        let contour = Contour {
+            points: vec![
+                Point { x: 10.0, y: 2.0 },
+                Point {
+                    x: 10.0 + w * 2.0,
+                    y: 2.0,
+                },
+                Point {
+                    x: 10.0 + w * 2.0,
+                    y: 12.0,
+                },
+                Point {
+                    x: 10.0 + w,
+                    y: 26.0,
+                },
+                Point { x: 10.0, y: 12.0 },
+            ],
+            closed: true,
+        };
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(contour)],
+            },
+        }
+    }
+
+    #[test]
+    fn a_sharp_apex_is_reported_as_an_angle_not_a_radius() {
+        // 18.9° is under the material's 30° minimum.
+        let report = run(vec![spike_layer(1, 18.9)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_angle")
+            .expect("a 19° apex must violate a 30° minimum");
+        assert_eq!(
+            v.severity,
+            Severity::Warning,
+            "T-14 is a warning, not an error"
+        );
+        assert_eq!(v.unit, Unit::Deg);
+        assert!((v.measured.expect("measured") - 18.9).abs() < 0.2);
+        assert_eq!(v.required, Some(30.0));
+        assert_eq!(v.count, 1, "only the apex is sharp");
+        assert!(v.actions.iter().any(|a| a.id == "round_corners"));
+    }
+
+    #[test]
+    fn an_angle_at_the_threshold_passes() {
+        let report = run(vec![spike_layer(1, 30.0)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "min_angle"),
+            "30° must satisfy a 30° minimum: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn an_ordinary_outline_raises_no_angle_warning() {
+        // A plain square: every corner is 90°, so nothing to report. A check that
+        // fires here would be noise, and noise is what made the old T-05 note
+        // worth keeping as an Info in the first place.
+        let report = run(vec![layer_from_contours(
+            1,
+            "Square",
+            vec![vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]]],
+        )]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "min_angle"),
+            "a square has no sharp corners: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn a_sharp_apex_does_not_fail_the_project_on_its_own() {
+        // Severity matters: an angle under 30° is a warning, so the project is
+        // still cuttable. Treating it as an error would block output for something
+        // the operator can see and decide about.
+        let report = run(vec![spike_layer(1, 18.9)]);
+        assert!(matches!(report.verdict, Verdict::PassWithWarnings));
+        assert_eq!(report.counts.error, 0);
+    }
+
+    #[test]
+    fn the_rendered_angle_is_in_degrees() {
+        // This is the bug: `format_measurement` on an angle printed millimetres,
+        // so the report told the operator an angle was a length.
+        let report = run(vec![spike_layer(1, 18.9)]);
+        let text = render(&report);
+        assert!(text.contains("18.9"), "measured value missing: {text}");
+        assert!(
+            text.contains('°'),
+            "the degree sign must be present: {text}"
+        );
+        assert!(
+            !text.contains("18.9 мм"),
+            "an angle must not be printed as millimetres: {text}"
+        );
+    }
+
+    #[test]
+    fn lengths_still_render_in_millimetres() {
+        // The unit field must not have broken the common case.
+        let report = run(vec![band_layer(1, 0.42, 200.0)]);
+        let text = render(&report);
+        assert!(text.contains("0.420 мм"), "lengths keep their unit: {text}");
+    }
+
+    #[test]
+    fn counts_are_inflected_in_the_user_facing_text() {
+        // "1 углов" and "1 островков не соединены" are both wrong, in the one line
+        // the operator is asked to trust.
+        assert_eq!(plural(1, "угол", "угла", "углов"), "угол");
+        assert_eq!(plural(2, "угол", "угла", "углов"), "угла");
+        assert_eq!(plural(5, "угол", "угла", "углов"), "углов");
+        assert_eq!(plural(11, "угол", "угла", "углов"), "углов");
+        assert_eq!(plural(21, "угол", "угла", "углов"), "угол");
+
+        assert_eq!(agreeing(1, "не соединён", "не соединены"), "не соединён");
+        assert_eq!(agreeing(2, "не соединён", "не соединены"), "не соединены");
+        assert_eq!(agreeing(11, "не соединён", "не соединены"), "не соединены");
+
+        assert_eq!(
+            counted(1, "островок", "островка", "островков"),
+            "1 островок"
+        );
+        assert_eq!(
+            counted(3, "островок", "островка", "островков"),
+            "3 островка"
+        );
+    }
+
+    #[test]
+    fn the_corner_radius_note_says_what_is_actually_checked() {
+        // The old note said only "not measured yet", which left the operator
+        // without knowing the angle was being checked instead.
+        let report = run(vec![spike_layer(1, 18.9)]);
+        let note = report
+            .violations
+            .iter()
+            .find(|v| v.code == "corner_radius")
+            .expect("the applicability note");
+        assert!(note.reason.contains("min_angle"), "{}", note.reason);
+        assert_eq!(note.severity, Severity::Info);
     }
 
     #[test]

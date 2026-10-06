@@ -119,6 +119,17 @@ pub fn format_measurement(measured: f64, required: f64) -> String {
     )
 }
 
+/// The same shape of message, in degrees.
+///
+/// A separate function rather than a unit parameter on the millimetre one,
+/// because getting the unit wrong is exactly the failure this guards against:
+/// `format_measurement` on an angle printed "18.925 mm" and told the operator
+/// that an angle was a length.
+#[must_use]
+pub fn format_degrees(measured: f64, required: f64) -> String {
+    format!("{measured:.1}° (минимум {required:.1}°)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +352,15 @@ mod island_tests {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
         }
+    }
+
+    #[test]
+    fn angles_are_formatted_in_degrees_not_millimetres() {
+        let text = format_degrees(18.9247, 30.0);
+        assert!(text.contains('°'), "degrees must be marked: {text}");
+        assert!(!text.contains("mm"), "an angle is not a length: {text}");
+        assert!(text.contains("18.9"), "{text}");
+        assert!(text.contains("30.0"), "{text}");
     }
 
     #[test]

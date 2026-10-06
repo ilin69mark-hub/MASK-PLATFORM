@@ -1,0 +1,47 @@
+{
+  "project_id": "MASK-ANG-001",
+  "revision": 1,
+  "target": {
+    "object": "Angle probe",
+    "part": "Flat",
+    "part_code": "ANG",
+    "dimensions_mm": [
+      40.0,
+      40.0
+    ]
+  },
+  "_comment": "TEST A1. A traced figure whose top vertex is about 21°, below the 30° minimum. Expected: min_angle warning naming that vertex; --round-corners fills it.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Sharp Spike",
+      "regions": [
+        {
+          "outer": [
+            [
+              8,
+              8
+            ],
+            [
+              32,
+              8
+            ],
+            [
+              32,
+              20
+            ],
+            [
+              20,
+              32
+            ],
+            [
+              8,
+              20
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    }
+  ]
+}

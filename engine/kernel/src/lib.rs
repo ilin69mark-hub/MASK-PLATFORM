@@ -11,6 +11,7 @@ pub mod boolean;
 pub mod bridge;
 pub mod canonical;
 pub mod constants;
+pub mod corner;
 pub mod gap;
 pub mod geom;
 pub mod hash;
@@ -24,11 +25,15 @@ pub use constants::{
     report, CANON_COORD_DP, CANON_QUANTUM_MM, COLLINEAR_MM, GEOM_EPS_MM, LIB_ENGINE_BITS,
     LIB_SCALE, MAX_COORDINATE_MM, MEASURE_EPS_MM, MEASURE_REPORT_DP, MIN_WIDTH_EPS_MM,
 };
+pub use corner::{
+    interior_angle, round_corners, sharp_corners, sharpest_corner, RoundReport, SharpCorner,
+};
 pub use gap::{gaps_per_region, min_gap, Gap};
 pub use geom::{Contour, GeometryError, Point, Shape, Shapes};
 pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
 pub use measure::{
-    bounding_box, contour_perimeter, format_measurement, meets_threshold, point_in_contour,
-    shape_area, shape_bounds, shapes_area, signed_contour_area, unanchored_islands,
+    bounding_box, contour_perimeter, format_degrees, format_measurement, meets_threshold,
+    point_in_contour, shape_area, shape_bounds, shapes_area, signed_contour_area,
+    unanchored_islands,
 };
 pub use offset::{lib_math_mode, min_width, offset_shape, survives_inward_offset, widen};

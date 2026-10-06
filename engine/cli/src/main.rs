@@ -43,6 +43,8 @@ struct Args {
     nest: bool,
     /// Add tabs to unanchored islands before validating.
     bridge: bool,
+    /// Fill in corners sharper than the material's minimum angle.
+    round: bool,
 }
 
 fn main() -> ExitCode {
@@ -234,6 +236,7 @@ fn parse_args() -> Result<Args, String> {
     let mut widen_to = None;
     let mut nest = false;
     let mut bridge = false;
+    let mut round = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -259,6 +262,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--nest" => nest = true,
             "--bridge" => bridge = true,
+            "--round-corners" => round = true,
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown argument {other:?}\n\n{}", usage())),
         }
@@ -273,6 +277,7 @@ fn parse_args() -> Result<Args, String> {
         widen_to,
         nest,
         bridge,
+        round,
     })
 }
 
@@ -281,7 +286,7 @@ fn usage() -> String {
 
 USAGE
   maskctl --fixture <file.json> --material <profile.json> \\
-          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest] [--bridge]"
+          --plotter <profile.json> [--out <dir>] [--widen-to <mm>] [--nest] [--bridge] [--round-corners]"
         .to_string()
 }
 
@@ -508,6 +513,39 @@ fn run(args: &Args) -> Result<bool, String> {
         .map(|l| build_layer(l, args.widen_to, args.bridge.then_some(limits)))
         .map(|layer| {
             let mut layer = layer?;
+            if args.round {
+                // Runs after bridging: a tab is a rectangle with four right
+                // angles, so bridging first means filleting can see them.
+                let (fixed, report) = mask_kernel::corner::round_corners(
+                    &layer.geometry,
+                    profile.limits.corner_radius_mm,
+                    profile.limits.min_angle_deg,
+                    plotter.blade.curve_tolerance_mm,
+                );
+                match report {
+                    mask_kernel::RoundReport::Complete { rounded } if rounded > 0 => {
+                        println!(
+                            "Auto-Fix L{:02}: filleted {rounded} corner(s), radius {} mm",
+                            layer.index,
+                            mask_kernel::report(profile.limits.corner_radius_mm)
+                        );
+                        layer.geometry = fixed;
+                    }
+                    // Naming what could not be done matters: a corner left sharp is
+                    // a tear, and the validator would otherwise report it with no
+                    // indication that an automatic fix had already been attempted.
+                    mask_kernel::RoundReport::Incomplete { rounded, skipped } => {
+                        println!(
+                            "Auto-Fix L{:02}: filleted {rounded}, left {} corner(s) sharp (edges too short)",
+                            layer.index,
+                            skipped.len()
+                        );
+                        layer.geometry = fixed;
+                    }
+                    mask_kernel::RoundReport::Complete { .. } => {}
+                }
+            }
+
             if args.bridge {
                 match mask_kernel::bridge::bridge_unanchored(&layer.geometry, limits) {
                     Ok((fixed, bridges)) => {

@@ -1,0 +1,47 @@
+{
+  "project_id": "MASK-ANG-001",
+  "revision": 1,
+  "target": {
+    "object": "Angle probe",
+    "part": "Flat",
+    "part_code": "ANG",
+    "dimensions_mm": [
+      40.0,
+      40.0
+    ]
+  },
+  "_comment": "TEST A1. A traced figure whose top vertex measures 43.6°, below nothing; see t9 for the sharp case. Kept as the clean control: an ordinary traced outline must raise nothing.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Ordinary Trace",
+      "regions": [
+        {
+          "outer": [
+            [
+              12,
+              4
+            ],
+            [
+              28,
+              4
+            ],
+            [
+              28,
+              16
+            ],
+            [
+              20,
+              36
+            ],
+            [
+              12,
+              16
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    }
+  ]
+}
