@@ -39,6 +39,50 @@ pub fn shapes_area(shapes: &Shapes) -> f64 {
     shapes.shapes.iter().map(shape_area).sum()
 }
 
+/// The shortest edge of a contour, in millimetres.
+///
+/// This is what T-10 means for polygonal geometry.
+///
+/// The docs state the rule as `path.length >= min_feature_length_mm`, and the
+/// auto-simplify step says "drop short paths". In this geometry model there are
+/// no open paths — every contour is a closed loop — so the honest measurable
+/// proxy is the shortest edge of that loop.
+///
+/// It is the right thing to measure, not merely the available one. A knife blade
+/// has an offset and an angle, so it cannot turn tightly; an edge shorter than
+/// the blade offset is not cut as drawn, it is rounded off by the tool. Those
+/// edges are noise from tracing and from floating-point slivers, and the
+/// auto-simplify step exists to remove them.
+///
+/// Returns `None` for a contour with fewer than two points, which has no edges.
+#[must_use]
+pub fn shortest_edge(contour: &Contour) -> Option<f64> {
+    let pts = &contour.points;
+    if pts.len() < 2 {
+        return None;
+    }
+    let n = pts.len();
+    let last = if contour.closed { n } else { n - 1 };
+    let mut shortest = f64::INFINITY;
+    for i in 0..last {
+        shortest = shortest.min(pts[i].distance_to(pts[(i + 1) % n]));
+    }
+    shortest.is_finite().then_some(shortest)
+}
+
+/// The shortest edge anywhere in a set of shapes.
+#[must_use]
+pub fn shortest_edge_in(shapes: &Shapes) -> Option<f64> {
+    shapes
+        .shapes
+        .iter()
+        .flat_map(|s| s.contours())
+        .filter_map(shortest_edge)
+        .fold(None, |acc: Option<f64>, e| {
+            Some(acc.map_or(e, |acc: f64| acc.min(e)))
+        })
+}
+
 /// Perimeter of a contour. Open contours omit the closing segment.
 #[must_use]
 pub fn contour_perimeter(contour: &Contour) -> f64 {
@@ -361,6 +405,95 @@ mod island_tests {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
         }
+    }
+
+    #[test]
+    fn the_shortest_edge_is_found_including_the_closing_one() {
+        // The closing edge is where a short edge usually hides: it is the segment
+        // from the last point back to the first, and skipping it is the easy
+        // omission.
+        let contour = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 10.0, y: 0.0 },
+                Point { x: 10.0, y: 10.0 },
+                Point { x: 0.4, y: 0.0 },
+            ],
+            closed: true,
+        };
+        // The closing edge is from (0.4, 0) back to (0, 0): 0.4 mm.
+        let shortest = shortest_edge(&contour).expect("edges");
+        assert!(
+            (shortest - 0.4).abs() < 1e-9,
+            "expected the 0.4 mm closing edge, got {shortest:.4}"
+        );
+    }
+
+    #[test]
+    fn an_open_contour_has_no_closing_edge() {
+        let contour = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 10.0, y: 0.0 },
+                Point { x: 10.0, y: 10.0 },
+            ],
+            closed: false,
+        };
+        let shortest = shortest_edge(&contour).expect("edges");
+        assert!(
+            (shortest - 10.0).abs() < 1e-9,
+            "expected 10 mm, got {shortest:.4}"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_contour_has_no_edges() {
+        assert_eq!(
+            shortest_edge(&Contour {
+                points: vec![],
+                closed: true
+            }),
+            None
+        );
+        assert_eq!(
+            shortest_edge(&Contour {
+                points: vec![Point { x: 1.0, y: 1.0 }],
+                closed: true
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn the_shortest_edge_across_a_layer_is_the_smallest_of_all_of_them() {
+        let shapes = Shapes {
+            shapes: vec![
+                Shape::new(Contour {
+                    points: vec![
+                        Point { x: 0.0, y: 0.0 },
+                        Point { x: 10.0, y: 0.0 },
+                        Point { x: 10.0, y: 10.0 },
+                        Point { x: 0.0, y: 10.0 },
+                    ],
+                    closed: true,
+                }),
+                Shape::new(Contour {
+                    points: vec![
+                        Point { x: 50.0, y: 0.0 },
+                        Point { x: 60.0, y: 0.0 },
+                        Point { x: 60.0, y: 10.0 },
+                        Point { x: 50.0, y: 10.0 },
+                        Point { x: 50.2, y: 10.0 },
+                    ],
+                    closed: true,
+                }),
+            ],
+        };
+        let shortest = shortest_edge_in(&shapes).expect("edges");
+        assert!(
+            (shortest - 0.2).abs() < 1e-9,
+            "expected the 0.2 mm edge, got {shortest:.4}"
+        );
     }
 
     #[test]

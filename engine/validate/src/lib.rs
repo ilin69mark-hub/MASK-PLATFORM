@@ -13,7 +13,7 @@
 use mask_kernel::{
     bounding_box, format_area, format_degrees, format_measurement, meets_threshold, min_gap,
     min_width, narrowest_neck, open_cut_contours, self_intersections, shape_area, shapes_area,
-    sharp_corners, unanchored_islands, Contour, Point, Shape, Shapes,
+    sharp_corners, shortest_edge_in, unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -186,6 +186,8 @@ pub struct LayerMetrics {
     pub min_island_area_mm2: Option<f64>,
     /// Regions per 100 square centimetres of the part footprint.
     pub density_per_100cm2: f64,
+    /// Shortest edge anywhere in this layer, in millimetres.
+    pub shortest_edge_mm: Option<f64>,
 }
 
 /// The result of one validation run.
@@ -380,6 +382,7 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
         min_gap_mm: min_gap(&layer.geometry).map(|g| g.mm),
         min_island_area_mm2: smallest_region_area(&layer.geometry),
         density_per_100cm2: density_per_100cm2(&layer.geometry),
+        shortest_edge_mm: shortest_edge_in(&layer.geometry),
     }
 }
 
@@ -653,6 +656,49 @@ fn check_layer(
                     },
                 ],
             });
+        }
+    }
+
+    // min_feature_length (T-10) — an edge too short for the knife to follow as
+    // drawn. The blade has an offset and an angle, so it rounds off anything
+    // shorter than that, and such edges are mostly tracing noise.
+    //
+    // A warning rather than an error: the mask is still cuttable, it just comes out
+    // slightly different from the drawing.
+    if let Some(rule) = rules.rule("min_feature_length") {
+        if let Some(shortest) = metrics.shortest_edge_mm {
+            if !meets_threshold(shortest, limits.feature_length_mm) {
+                violations.push(Violation {
+                    code: rule.code.clone(),
+                    severity: rule.severity,
+                    layer_index: Some(layer.index),
+                    measured: Some(shortest),
+                    required: Some(limits.feature_length_mm),
+                    unit: Unit::Mm,
+                    count: 1,
+                    headline: format!(
+                        "Слой {} «{}»: самое короткое ребро — {}. Нож его закруглит.",
+                        layer.index,
+                        layer.name,
+                        format_measurement(shortest, limits.feature_length_mm)
+                    ),
+                    reason: rule.reason.to_string(),
+                    actions: vec![
+                        Action {
+                            id: "simplify".into(),
+                            label: "Упростить контур".into(),
+                            primary: true,
+                            estimated_fidelity_loss: Some(0.005),
+                        },
+                        Action {
+                            id: "show_elements".into(),
+                            label: "Показать элементы".into(),
+                            primary: false,
+                            estimated_fidelity_loss: None,
+                        },
+                    ],
+                });
+            }
         }
     }
 
@@ -1771,6 +1817,108 @@ mod tests {
             reported < 2.0,
             "should report the tab, not the frame, got {reported:.4}"
         );
+    }
+
+    /// A wide square with one corner nudged in by `short_edge_mm`.
+    ///
+    /// Wide, so the width rule stays silent and the short edge is the only thing
+    /// under test. An earlier version made the figure narrow as well, which meant
+    /// the project failed for two reasons and the assertion about the verdict was
+    /// testing the wrong one.
+    fn sliver_layer(index: u32, short_edge_mm: f64) -> LayerInput {
+        let contour = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 0.0 },
+                Point { x: 20.0, y: 20.0 },
+                Point {
+                    x: short_edge_mm,
+                    y: 20.0,
+                },
+                Point { x: 0.0, y: 20.0 },
+            ],
+            closed: true,
+        };
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(contour)],
+            },
+        }
+    }
+
+    #[test]
+    fn an_edge_shorter_than_the_minimum_feature_is_reported() {
+        // The material asks for 3.00 mm. A 0.4 mm edge cannot be cut as drawn.
+        let report = run(vec![sliver_layer(1, 0.4)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_feature_length")
+            .expect("a 0.4 mm edge must be reported");
+        assert_eq!(
+            v.severity,
+            Severity::Warning,
+            "the mask is still cuttable, just not as drawn"
+        );
+        assert!((v.measured.expect("measured") - 0.4).abs() < 0.05);
+        assert_eq!(v.required, Some(3.00));
+    }
+
+    #[test]
+    fn a_layer_without_short_edges_is_not_reported() {
+        // A plain square. Passing 20 to sliver_layer would not do: its nudged
+        // corner would land exactly on the previous vertex and create a zero-length
+        // edge, which is a duplicate point rather than a square.
+        let report = run(vec![layer_from_contours(
+            1,
+            "Square",
+            vec![vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]]],
+        )]);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "min_feature_length"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn a_duplicate_vertex_is_reported_rather_than_ignored() {
+        // The same thing seen from the other side: two identical points make a
+        // zero-length edge, and a knife cannot cut that at all.
+        let report = run(vec![sliver_layer(1, 20.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_feature_length")
+            .expect("a zero-length edge must be reported, not silently dropped");
+        assert!(v.measured.expect("measured") < 1e-6);
+    }
+
+    #[test]
+    fn the_shortest_edge_is_reported_per_layer() {
+        let report = run(vec![sliver_layer(1, 0.4)]);
+        let shortest = report.layers[0].shortest_edge_mm.expect("a measurement");
+        assert!((shortest - 0.4).abs() < 0.05, "got {shortest:.4}");
+    }
+
+    #[test]
+    fn a_short_feature_is_not_an_error_on_its_own() {
+        // It has to be a warning, or a slightly sloppy tracing would block output
+        // for something the knife will simply round off. The figure here is 20 mm
+        // wide, so nothing else fires and the verdict has to stay clean.
+        let report = run(vec![sliver_layer(1, 0.4)]);
+        assert_eq!(report.counts.error, 0, "a short edge must not be an error");
+        assert!(
+            matches!(report.verdict, Verdict::PassWithWarnings),
+            "{:?}",
+            report.verdict
+        );
+        assert_eq!(report.counts.warning, 1);
     }
 
     #[test]

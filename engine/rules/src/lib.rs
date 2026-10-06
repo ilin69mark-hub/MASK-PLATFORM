@@ -19,6 +19,8 @@ pub struct EffectiveLimits {
     pub island_width_mm: f64,
     /// Minimum island area, from `material.minimums.island_area_mm2`.
     pub island_area_mm2: f64,
+    /// Minimum feature length, from `material.minimums.feature_length_mm`.
+    pub feature_length_mm: f64,
     pub corner_radius_mm: f64,
     /// Minimum interior angle, from `material.limits.min_angle_deg`.
     pub min_angle_deg: f64,
@@ -135,6 +137,7 @@ impl CuttingProfile {
                 gap_mm,
                 island_width_mm,
                 island_area_mm2: material.minimums.island_area_mm2,
+                feature_length_mm: material.minimums.feature_length_mm,
                 corner_radius_mm,
                 min_angle_deg: material.limits.min_angle_deg,
                 bridge_width_mm,
@@ -209,6 +212,7 @@ impl Rule {
             "gap_mm" => limits.gap_mm,
             "island_width_mm" => limits.island_width_mm,
             "island_area_mm2" => limits.island_area_mm2,
+            "feature_length_mm" => limits.feature_length_mm,
             "corner_radius_mm" => limits.corner_radius_mm,
             "min_angle_deg" => limits.min_angle_deg,
             "bridge_width_mm" => limits.bridge_width_mm,
@@ -319,6 +323,15 @@ impl RuleSet {
                 reason: "Нож пойдёт по линии до края листа и вырежет не то, что задумано.".into(),
             },
             Rule {
+                code: "min_feature_length".into(),
+                severity: Severity::Warning,
+                measure: Measure::MinGap,
+                auto_fixable: true,
+                threshold: "feature_length_mm".into(),
+                headline: "{n} рёбер короче {required} мм.".into(),
+                reason: "Нож не может довернуть на таком коротком ребре: край будет закруглён и выйдет не так, как нарисовано.".into(),
+            },
+            Rule {
                 code: "bridge_width".into(),
                 severity: Severity::Error,
                 measure: Measure::BridgeWidth,
@@ -381,8 +394,8 @@ mod tests {
                 line_width_mm: 0.80,
                 gap_mm: 0.90,
                 island_area_mm2: 2.40,
-                island_width_mm: 0.60,
                 feature_length_mm: 3.00,
+                island_width_mm: 0.60,
                 corner_radius_mm: 0.40,
                 bridge_width_mm: 1.20,
                 bridge_length_mm: 25.0,

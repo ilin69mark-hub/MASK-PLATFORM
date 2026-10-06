@@ -35,8 +35,8 @@ pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
 pub use integrity::{open_cut_contours, self_intersections, OpenContour, SelfIntersection};
 pub use measure::{
     bounding_box, contour_perimeter, format_area, format_degrees, format_measurement,
-    meets_threshold, point_in_contour, shape_area, shape_bounds, shapes_area, signed_contour_area,
-    unanchored_islands,
+    meets_threshold, point_in_contour, shape_area, shape_bounds, shapes_area, shortest_edge,
+    shortest_edge_in, signed_contour_area, unanchored_islands,
 };
 pub use offset::{
     lib_math_mode, min_width, narrowest_neck, offset_shape, survives_inward_offset, widen,
