@@ -413,8 +413,27 @@ fn extract_layers(value: &serde_json::Value) -> Result<Vec<LayerInput>, JsError>
         // a reference needs the geometry store, which lives on the server.
         let geometry = match layer.get("geometry") {
             Some(serde_json::Value::Object(map)) if map.contains_key("shapes") => {
-                serde_json::from_value::<Shapes>(serde_json::Value::Object(map.clone()))
-                    .map_err(|e| JsError::new(format!("layer {index} geometry: {e}")))?
+                let shapes: Shapes =
+                    serde_json::from_value::<Shapes>(serde_json::Value::Object(map.clone()))
+                        .map_err(|e| JsError::new(format!("layer {index} geometry: {e}")))?;
+                // Validated here, at the boundary where untrusted JSON becomes
+                // geometry. `measure_layer_inner` has always done this; `validate_project`
+                // did not, and that left the document path as the one way to reach the
+                // validator with geometry nothing else would accept.
+                //
+                // ADR-0015 closed the panic inside the kernel, and this is why that
+                // was not enough on its own: a contour with no points and a non-empty
+                // arc list still reached `resolved_arcs`, where `points.len() - 1`
+                // underflows. Re-verified on the rebuilt artifact — the kernel check
+                // cannot run because nothing validated the input first.
+                //
+                // The error arrives as a rejected promise rather than a trap, which is
+                // the difference between the editor saying what is wrong with the
+                // document and the editor becoming unusable.
+                shapes
+                    .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+                    .map_err(|e| JsError::new(format!("layer {index} geometry: {e}")))?;
+                shapes
             }
             _ => {
                 return Err(JsError::new(format!(
@@ -624,6 +643,63 @@ mod tests {
     #[test]
     fn constants_match_the_kernel_grid() {
         assert!((mask_kernel::CANON_QUANTUM_MM - CANON_QUANTUM_MM).abs() < f64::EPSILON);
+    }
+
+    /// The browser entry point must refuse malformed geometry, not trap on it.
+    ///
+    /// Regression for ADR-0015. `extract_layers` deserialised geometry without
+    /// checking it, so a contour carrying no points and a non-empty arc list reached
+    /// `resolved_arcs`, where `points.len() - 1` underflowed. On the rebuilt wasm
+    /// artifact that input produced `RuntimeError: unreachable` — a panic, which in
+    /// wasm does not throw but kills the module, taking every later editor call with
+    /// it. `measure_layer` had always validated; `validate_project` had not, which
+    /// made the document path the one unguarded way in.
+    #[test]
+    fn a_layer_with_arcs_and_no_points_is_refused_rather_than_trapping() {
+        let bad = serde_json::json!({
+            "composition": { "layers": [{
+                "index": 1,
+                "name": "Broken",
+                "geometry": { "shapes": [{
+                    "outer": {
+                        "points": [],
+                        "closed": false,
+                        "arcs": [{ "from": 0, "to": 1, "centre": {"x": 0.0, "y": 0.0},
+                                   "radius": 5.0, "ccw": true }]
+                    },
+                    "holes": []
+                }]}
+            }]}
+        });
+
+        let err = extract_layers(&bad).expect_err("an arc with no points names nothing");
+        assert!(
+            err.message.contains("points") || err.message.contains("TooFewPoints"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_layer_whose_arc_has_no_radius_is_refused_with_a_reason() {
+        let bad = serde_json::json!({
+            "composition": { "layers": [{
+                "index": 1,
+                "name": "Broken",
+                "geometry": { "shapes": [{
+                    "outer": {
+                        "points": [[0,0],[10,0],[10,10],[0,10]],
+                        "closed": true,
+                        "arcs": [{ "from": 0, "to": 1, "centre": {"x": 0.0, "y": 0.0},
+                                   "radius": 0.0, "ccw": true }]
+                    },
+                    "holes": []
+                }]}
+            }]}
+        });
+
+        let err = extract_layers(&bad).expect_err("a zero radius is not a curve");
+        assert!(err.message.contains("arc"), "{}", err.message);
     }
 
     #[test]

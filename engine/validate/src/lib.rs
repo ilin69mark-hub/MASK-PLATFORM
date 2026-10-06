@@ -649,9 +649,24 @@ fn check_layer(
     // Contours now carry arcs, so the radius exists. The check is applied when the
     // geometry has curves and stays silent when it does not — which is now a fact
     // about the geometry rather than an assumption about it.
+    //
+    // The `if let` is the load-bearing part, and it is there rather than an `expect`
+    // because the two used to disagree. `has_curves` was true for any non-empty arc
+    // list while `min_corner_radius` filtered `r > 0.0`, so a contour carrying a
+    // zero-radius arc made the first say yes and the second say none — and the
+    // `expect` between them panicked. In wasm that does not throw, it kills the
+    // module: the next call from the editor fails too.
+    //
+    // Arc validation (ADR-0015) makes the disagreement unreachable, so this is
+    // defence in depth rather than the fix. The crate promises at its head that it
+    // never panics, and that promise should not rest on an earlier call having
+    // happened.
     if let Some(rule) = rules.rule("corner_radius") {
-        if has_curves(&layer.geometry) {
-            let radius = min_corner_radius(&layer.geometry).expect("curves exist");
+        // `min_corner_radius` is already `None` for a polygon: it folds over arcs and
+        // a polygon has none. The extra `has_curves` guard the original code reached
+        // for is not needed, and the two only ever disagreed because neither was
+        // checked against the other's answer.
+        if let Some(radius) = min_corner_radius(&layer.geometry) {
             if !meets_threshold(radius, limits.corner_radius_mm) {
                 violations.push(Violation {
                     code: rule.code.clone(),
@@ -2899,6 +2914,53 @@ mod tests {
         assert_eq!(v.severity, Severity::Error);
         assert!((v.measured.expect("measured") - 0.2).abs() < 1e-6);
         assert_eq!(v.required, Some(0.40));
+    }
+
+    /// The regression behind ADR-0015: a contour carrying an arc the arc
+    /// measurement cannot report used to take the validator down.
+    ///
+    /// `has_curves` was true for any non-empty arc list while `min_corner_radius`
+    /// filtered `r > 0.0`, so a zero-radius arc made the first say yes and the
+    /// second say none, and the `expect` between them panicked. In wasm a panic
+    /// does not throw — it kills the module, so the next editor call failed too.
+    ///
+    /// Asserted on behaviour rather than on the absence of a panic: the crate
+    /// promises at its head that every problem becomes a violation, so a run that
+    /// returns a report is the contract, whatever the verdict inside it is.
+    #[test]
+    fn an_arc_the_measurement_cannot_report_does_not_take_the_validator_down() {
+        for radius in [0.0, -1.0, f64::NAN] {
+            let geometry = layer(Shapes::single(Shape {
+                outer: Contour {
+                    points: vec![
+                        Point { x: 0.0, y: 0.0 },
+                        Point { x: 10.0, y: 0.0 },
+                        Point { x: 10.0, y: 10.0 },
+                    ],
+                    closed: true,
+                    arcs: vec![mask_kernel::ArcSegment {
+                        from: 0,
+                        to: 1,
+                        centre: Point { x: 5.0, y: 0.0 },
+                        radius,
+                        ccw: true,
+                    }],
+                },
+                holes: vec![],
+            }));
+
+            // Reaching here without a panic is half the assertion. The other half
+            // is that nothing invents a number: an arc the measurement cannot report
+            // must not produce a `corner_radius` violation carrying `measured: 0.0`,
+            // which would read as "your curve is too tight" and send the operator to
+            // round a corner that does not exist.
+            let report = run(vec![geometry]);
+            assert!(
+                !report.violations.iter().any(|v| v.code == "corner_radius"),
+                "a radius of {radius} is not a curve; it must not be reported as one: {:?}",
+                report.violations
+            );
+        }
     }
 
     #[test]

@@ -29,6 +29,35 @@ pub enum GeometryError {
 
     #[error("hole {index} winds the same way as its outer contour; holes must be clockwise")]
     HoleOrientation { index: usize },
+
+    /// An arc's radius is not a radius.
+    ///
+    /// Zero is included: a zero-radius arc collapses its control points onto the
+    /// chord, so it draws a straight edge while still counting as a curve — the
+    /// geometry, its area and its hash would all disagree with the polygon that
+    /// has no arc at all (ADR-0015).
+    #[error(
+        "arc {index} has radius {radius}, which is not a curve; it must be finite and above zero"
+    )]
+    ArcRadius { index: usize, radius: f64 },
+
+    /// An arc names points the contour does not have, or does not describe a curve
+    /// the pipeline can actually draw.
+    ///
+    /// Every consumer of an arc — area, perimeter, flattening, canonical path data —
+    /// replaces exactly one edge. An arc spanning several edges used to be dropped
+    /// silently by all of them, which made the content hash of a shape that declared
+    /// a curve identical to the hash of the polygon without one (ADR-0015).
+    #[error(
+        "arc {index} runs from point {from} to point {to} of a {count} point contour; \
+         an arc replaces exactly one edge, so it must satisfy from < to <= {count} with to = from + 1"
+    )]
+    ArcIndex {
+        index: usize,
+        from: usize,
+        to: usize,
+        count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -330,6 +359,43 @@ impl Contour {
         if self.points.len() < min {
             return Err(GeometryError::TooFewPoints { min });
         }
+
+        // Arcs are part of the contour, so they are checked with it.
+        //
+        // Order matters: an arc names two indices into `points`, so confirming that
+        // the points exist has to come first. Validating them after would make every
+        // arc error depend on whether the contour happened to be long enough.
+        //
+        // Nothing here was checked before ADR-0015, which is how a document with a
+        // zero-radius arc reached `expect("curves exist")` in the validator and
+        // panicked, and how an arc pointing past the end was dropped without a word
+        // while the content hash still called the shape identical to a polygon.
+        let count = self.points.len();
+        for (index, arc) in self.arcs.iter().enumerate() {
+            if !arc.radius.is_finite() || arc.radius <= 0.0 {
+                return Err(GeometryError::ArcRadius {
+                    index,
+                    radius: arc.radius,
+                });
+            }
+            // One arc replaces exactly one edge, and every consumer agrees on that:
+            // `resolved_arcs` requires it, `flattened` matches it, and `to_path_data`
+            // draws from `resolved_arcs`. An arc spanning several edges is dropped by
+            // all three without a word, so the shape declared a curve, T-05 counted
+            // itself as active, and the area and hash came from the polygon.
+            //
+            // The last edge of a closed contour wraps to point 0, so `to` there is 0
+            // rather than `count` — the same rule `resolved_arcs` applies.
+            let last = if self.closed { count } else { count - 1 };
+            if arc.from >= last || arc.to != (arc.from + 1) % count {
+                return Err(GeometryError::ArcIndex {
+                    index,
+                    from: arc.from,
+                    to: arc.to,
+                    count,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -526,6 +592,119 @@ mod tests {
     }
 
     const LIMIT: f64 = 100_000.0;
+
+    /// A square with one edge replaced by an arc, so arc tests have real geometry
+    /// to sit on. The arc runs along the bottom edge from (0,0) to (10,0) with its
+    /// centre below, bulging the curve downward.
+    fn square_with_arc(radius: f64, from: usize, to: usize) -> Contour {
+        Contour {
+            points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0)],
+            closed: true,
+            arcs: vec![ArcSegment {
+                from,
+                to,
+                centre: p(5.0, -radius),
+                radius,
+                ccw: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_arc_with_a_non_positive_radius_is_rejected() {
+        // Reproduces a reachable panic in the validator: `has_curves` is true for a
+        // non-empty arc list while `min_arc_radius` filters `r > 0.0`, so the two
+        // disagreed and `expect("curves exist")` fired on `None`.
+        for radius in [0.0, -1.0] {
+            let err = square_with_arc(radius, 0, 1)
+                .validate(LIMIT)
+                .expect_err("a zero or negative radius is not a curve");
+            assert!(matches!(err, GeometryError::ArcRadius { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_finite_arc_radius_is_rejected() {
+        // The module header forbids NaN and Inf in stored geometry. That promise
+        // held for points and did not hold for arcs.
+        let mut contour = square_with_arc(5.0, 0, 1);
+        contour.arcs[0].radius = f64::NAN;
+        let err = contour.validate(LIMIT).expect_err("NaN radius");
+        assert!(matches!(err, GeometryError::ArcRadius { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn the_wrapping_arc_on_a_closed_contour_is_legal() {
+        // The last edge of a closed contour runs from the final point back to point
+        // 0, so its arc names `to = 0` rather than `to = count`. Rejecting that would
+        // forbid rounding the seam of every closed shape — which is exactly what
+        // `round_corners` produces.
+        let contour = square_with_arc(5.0, 3, 0);
+        assert!(
+            contour.validate(LIMIT).is_ok(),
+            "the closing arc is a real edge: {:?}",
+            contour.validate(LIMIT)
+        );
+    }
+
+    #[test]
+    fn an_arc_spanning_several_edges_is_rejected() {
+        // The defect ADR-0015 was written for. `resolved_arcs`, `flattened` and
+        // `to_path_data` all drop such an arc in silence, so a shape that declared a
+        // curve measured, hashed and drew as the polygon without one — verified to
+        // produce a digest identical to that polygon's.
+        let err = square_with_arc(5.0, 0, 3)
+            .validate(LIMIT)
+            .expect_err("one arc replaces one edge");
+        assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_arc_reaching_past_the_last_point_is_rejected() {
+        let err = square_with_arc(5.0, 0, 99)
+            .validate(LIMIT)
+            .expect_err("an arc past the end names nothing");
+        assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_arc_starting_past_the_last_point_is_rejected() {
+        let err = square_with_arc(5.0, 99, 99)
+            .validate(LIMIT)
+            .expect_err("from past the end");
+        assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_empty_arc_run_is_rejected() {
+        // `from == to` describes no curve at all. Accepted, it would add a run that
+        // draws nothing while still flipping `has_arcs`, and T-05 would report
+        // itself as active over a polygon.
+        let err = square_with_arc(5.0, 1, 1)
+            .validate(LIMIT)
+            .expect_err("an empty run is not a curve");
+        assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_arc_that_touches_nothing_still_survives_point_counting() {
+        // The regression this whole change is about: an open contour with no points
+        // and a non-empty arc list slipped past the `arcs.is_empty()` early return
+        // and underflowed `points.len() - 1` in `flattened`.
+        let contour = Contour {
+            points: Vec::new(),
+            closed: false,
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: p(0.0, 0.0),
+                radius: 5.0,
+                ccw: true,
+            }],
+        };
+        // Rejected by the point count, which is checked before the arcs.
+        assert!(contour.validate(LIMIT).is_err());
+    }
 
     #[test]
     fn an_empty_arc_list_means_every_edge_is_straight() {
