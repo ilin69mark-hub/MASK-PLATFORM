@@ -9,6 +9,12 @@ import {
   loadKernel,
   measure,
 } from "@/lib/kernel";
+import {
+  type MeasurementState,
+  belowMinimum,
+  shownMm,
+  statusView,
+} from "@/lib/status";
 
 /**
  * Mask Studio canvas.
@@ -46,13 +52,15 @@ export interface StudioProps {
   minGapMm: number;
 }
 
-interface Measurement {
-  status: "idle" | "measuring" | "ready" | "error";
-  result?: LayerResult;
-  error?: string;
-  /** Milliseconds spent in the kernel, for the budget display. */
-  elapsedMs?: number;
-}
+/**
+ * One definition of the measurement state, not two.
+ *
+ * This used to be a single `status` field with every other field optional, so
+ * `{status: "error", result: someResult}` type-checked — a state that is both
+ * measured and failed. The union in `lib/status.ts` makes that unrepresentable, and
+ * the extractor was worth doing for this alone on top of being testable.
+ */
+type Measurement = MeasurementState<LayerResult>;
 
 export function StudioCanvas({
   shapes,
@@ -121,14 +129,20 @@ export function StudioCanvas({
     return () => clearTimeout(handle);
   }, [shapes, kernelReady]);
 
+  // Narrowed once, here, rather than at each use. The union says a result exists only
+  // for a ready measurement; the old shape — `result?: LayerResult` beside a bare
+  // `status` field — let a failed measurement carry a result too, which is how this
+  // component ended up with an error it could not display.
+  const ready = measurement.status === "ready" ? measurement.result : undefined;
+
   const view = useMemo(() => {
-    const [, , w, h] = measurement.result?.bbox ?? [0, 0, 100, 100];
+    const [, , w, h] = ready?.bbox ?? [0, 0, 100, 100];
     // Padding in millimetres, so the margin looks the same at any zoom.
     const pad = Math.max(w, h) * 0.04 || 5;
     return { minX: -pad, minY: -pad, w: w + pad * 2, h: h + pad * 2 };
-  }, [measurement.result]);
+  }, [ready]);
 
-  const pathData = measurement.result?.path_data ?? [];
+  const pathData = ready?.path_data ?? [];
 
   const handleDownload = useCallback(() => {
     // The browser produces a preview, not a production file. Production export
@@ -196,7 +210,7 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
               <path key={i} d={d} />
             ))}
           </g>
-          {mode === "mask" && measurement.result?.min_width_mm != null && (
+          {mode === "mask" && ready?.min_width_mm !== undefined && (
             <ThresholdLine
               y={view.minY + view.h / 2}
               x={view.minX}
@@ -207,9 +221,7 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
         </svg>
       </div>
 
-      {measurement.status === "ready" && measurement.result && (
-        <CrossingWarning crossings={measurement.result.self_intersections} />
-      )}
+      {ready && <CrossingWarning crossings={ready.self_intersections} />}
 
       <footer className="studio-status">
         <StatusBar
@@ -314,37 +326,29 @@ function StatusBar({
   minGapMm: number;
   onDownload: () => void;
 }) {
-  // The error branch comes first, and that is the order doing the work rather than
-  // an accident. Loading is the default state and an error is the exception to it,
-  // so the exception is asked about first: with the opposite order, a component that
-  // recorded an error without also marking itself ready would show "loading" for
-  // ever, and the message would sit unreachable behind the guard. That is not
-  // hypothetical — it is what this component did until the load failure was found.
-  if (measurement.status === "error") {
+  // The decision of what to show lives in lib/status.ts, not here, because it was
+  // once wrong in a way reading this file would not have caught. See the note there.
+  const view = statusView(kernelReady, measurement);
+  if (view.kind === "error") {
     return (
       <span className="error" role="alert">
-        {measurement.error}
+        {view.text}
       </span>
     );
   }
-  if (!kernelReady) {
-    return <span className="muted">Загрузка геометрического ядра…</span>;
-  }
-  if (measurement.status !== "ready" || !measurement.result) {
-    return <span className="muted">Измерение…</span>;
+  if (view.kind !== "metrics") {
+    return <span className="muted">{view.text}</span>;
   }
 
-  const r = measurement.result;
+  const r = view.result;
 
   // Compared with the same 1e-3 band the kernel uses (ADR-0004). Without it a
   // layer sitting exactly on the limit would flicker between pass and fail.
-  const tooNarrow =
-    r.min_width_mm !== undefined && r.min_width_mm < minWidthMm - MIN_WIDTH_EPS_MM;
+  const tooNarrow = belowMinimum(r.min_width_mm, minWidthMm, MIN_WIDTH_EPS_MM);
   // The same band for the gap (T-02). Two elements 0.900 mm apart with a 0.900 mm
   // minimum is manufacturable, and reporting it otherwise would train the user to
   // ignore this line.
-  const tooClose =
-    r.min_gap !== undefined && r.min_gap.mm < minGapMm - MIN_WIDTH_EPS_MM;
+  const tooClose = belowMinimum(r.min_gap?.mm, minGapMm, MIN_WIDTH_EPS_MM);
 
   return (
     <div className="status-row">
@@ -363,7 +367,7 @@ function StatusBar({
           data-testid="min-width"
           className={tooNarrow ? "error" : undefined}
         >
-          {r.min_width_mm === undefined ? "—" : `${r.min_width_mm.toFixed(3)} мм`}
+          {shownMm(r.min_width_mm)}
         </strong>
         {tooNarrow && (
           <span className="error">
@@ -377,7 +381,7 @@ function StatusBar({
         <strong data-testid="min-gap" className={tooClose ? "error" : undefined}>
           {/* Undefined for one region: there is no neighbour to be close to, and
               printing 0.000 mm there would state that a gap was measured. */}
-          {r.min_gap === undefined ? "—" : `${r.min_gap.mm.toFixed(3)} мм`}
+          {shownMm(r.min_gap?.mm)}
         </strong>
         {tooClose && (
           <span className="error">
@@ -387,7 +391,7 @@ function StatusBar({
         )}
       </span>
       <span className="muted">
-        ядро {measurement.elapsedMs?.toFixed(0)} мс · {r.content_hash.slice(7, 19)}
+        ядро {view.elapsedMs?.toFixed(0)} мс · {r.content_hash.slice(7, 19)}
       </span>
       <button type="button" onClick={onDownload}>
         Скачать превью

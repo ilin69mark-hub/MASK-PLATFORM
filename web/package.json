@@ -10,7 +10,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/",
+    "test": "node --experimental-strip-types --test \"tests/*.test.ts\"",
     "kernel:dist": "wasm-pack build --target web --release --out-dir ../web/public/pkg",
     "kernel:check": "node scripts/kernel-contract-check.mjs"
   },
