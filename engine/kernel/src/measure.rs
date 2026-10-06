@@ -13,7 +13,10 @@ use crate::geom::{Contour, Point, Shape, Shapes};
 #[must_use]
 pub fn signed_contour_area(contour: &Contour) -> f64 {
     let pts = &contour.points;
-    if pts.len() < 3 {
+    // Two points and one arc is a legitimate lens: the shoelace term over two
+    // points is zero and the arc contributes the whole area. Guarding at three
+    // points, as this did, silently reported a lens as having no area at all.
+    if pts.len() < 2 {
         return 0.0;
     }
     let mut acc = 0.0;
@@ -22,7 +25,23 @@ pub fn signed_contour_area(contour: &Contour) -> f64 {
         let b = pts[(i + 1) % pts.len()];
         acc += a.x * b.y - b.x * a.y;
     }
-    acc / 2.0
+    let chordal = acc / 2.0;
+
+    // Every arc bulges away from its chord, and the difference is the circular
+    // segment. Without this a circle of radius 10 reports the area of its inscribed
+    // square: 200 instead of 314.159, a silent third off.
+    //
+    // Accumulated separately from the shoelace term on purpose: `acc` above holds
+    // the *doubled* area and only becomes an area when divided by two, while a
+    // segment is already an area. Adding the segment into the same accumulator and
+    // halving once at the end silently reported 257.08 for a 314.16 circle.
+    let segments: f64 = contour
+        .resolved_arcs()
+        .iter()
+        .map(|(arc, from, to)| crate::geom::arc_segment_area(arc, *from, *to))
+        .sum();
+
+    chordal + segments
 }
 
 /// Area of a shape with its holes subtracted.
@@ -90,14 +109,27 @@ pub fn contour_perimeter(contour: &Contour) -> f64 {
     if pts.len() < 2 {
         return 0.0;
     }
+    let n = pts.len();
     let mut total = 0.0;
-    for i in 0..pts.len() - 1 {
-        total += pts[i].distance_to(pts[i + 1]);
+    for i in 0..n.saturating_sub(1) {
+        total += edge_length(contour, i, pts[i], pts[i + 1]);
     }
-    if contour.closed && pts.len() > 2 {
-        total += pts[pts.len() - 1].distance_to(pts[0]);
+    if contour.closed && n > 2 {
+        total += edge_length(contour, n - 1, pts[n - 1], pts[0]);
     }
     total
+}
+
+/// Length of one edge: the arc length where there is an arc, the chord otherwise.
+fn edge_length(contour: &Contour, edge: usize, from: Point, to: Point) -> f64 {
+    contour
+        .resolved_arcs()
+        .iter()
+        .find(|(arc, _, _)| arc.from == edge)
+        .map_or_else(
+            || from.distance_to(to),
+            |(arc, a, b)| crate::geom::arc_length(arc, *a, *b),
+        )
 }
 
 /// Axis-aligned bounding box as `(min_x, min_y, width, height)`.
@@ -430,6 +462,7 @@ fn sample_points(shape: &Shape, count: usize) -> Vec<Point> {
 #[cfg(test)]
 mod island_tests {
     use super::*;
+    use crate::geom::ArcSegment;
 
     fn p(x: f64, y: f64) -> Point {
         Point { x, y }
@@ -535,6 +568,205 @@ mod island_tests {
         assert!(
             (shortest - 0.2).abs() < 1e-9,
             "expected the 0.2 mm edge, got {shortest:.4}"
+        );
+    }
+
+    /// A circle of the given radius as four points and four quarter arcs.
+    fn circle(radius: f64) -> Contour {
+        let points: Vec<Point> = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (i as f64);
+                Point {
+                    x: radius * a.cos(),
+                    y: radius * a.sin(),
+                }
+            })
+            .collect();
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius,
+                ccw: true,
+            })
+            .collect();
+        Contour {
+            points,
+            closed: true,
+            arcs,
+        }
+    }
+
+    #[test]
+    fn a_circle_of_arcs_measures_exactly_its_true_area() {
+        // The bug this fixes: the chordal polygon of a circle of radius 10 is a
+        // square of area 200, and reporting that for a cut of area 314 is a silent
+        // third off — the same class of wrong number as the hole-winding bug.
+        let contour = circle(10.0);
+        let shapes = Shapes {
+            shapes: vec![Shape::new(contour)],
+        };
+        let area = shapes_area(&shapes);
+        let exact = std::f64::consts::PI * 100.0;
+        assert!(
+            (area - exact).abs() < 1e-9,
+            "a circle should measure exactly, got {area} against {exact}"
+        );
+    }
+
+    #[test]
+    fn a_circle_of_arcs_measures_exactly_its_perimeter() {
+        let contour = circle(10.0);
+        let perimeter = contour_perimeter(&contour);
+        let exact = 2.0 * std::f64::consts::PI * 10.0;
+        assert!(
+            (perimeter - exact).abs() < 1e-9,
+            "got {perimeter} against {exact}"
+        );
+    }
+
+    #[test]
+    fn the_same_points_straight_and_curved_measure_differently() {
+        // Both readings are correct for their own geometry. That they differ is the
+        // point: a curve is not its chord, and a measurement that cannot tell them
+        // apart is measuring the wrong thing.
+        let curved = circle(10.0);
+        let straight = Contour {
+            points: curved.points.clone(),
+            closed: true,
+            arcs: Vec::new(),
+        };
+        let curved_area = shapes_area(&Shapes {
+            shapes: vec![Shape::new(curved.clone())],
+        });
+        let straight_area = shapes_area(&Shapes {
+            shapes: vec![Shape::new(straight.clone())],
+        });
+        assert!(
+            (curved_area - straight_area).abs() > 100.0,
+            "a curve and its chord polygon must not measure the same: {curved_area} vs {straight_area}"
+        );
+        assert!((contour_perimeter(&curved) - contour_perimeter(&straight)).abs() > 5.0);
+    }
+
+    #[test]
+    fn a_semicircle_arc_measures_its_segment_area() {
+        // Two points and one arc sweeping half a turn. The chord here is the
+        // diameter, so the segment between chord and arc *is* the half disc —
+        // 157.08, not "half disc minus triangle". The triangle only appears for a
+        // chord that is not a diameter, and subtracting 100 was simply wrong.
+        let contour = Contour {
+            points: vec![Point { x: 10.0, y: 0.0 }, Point { x: -10.0, y: 0.0 }],
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: 10.0,
+                ccw: true,
+            }],
+            closed: true,
+        };
+        let area = signed_contour_area(&contour).abs();
+        let expected = std::f64::consts::PI * 100.0 / 2.0;
+        assert!(
+            (area - expected).abs() < 1e-9,
+            "got {area} against {expected}"
+        );
+    }
+
+    #[test]
+    fn an_arc_sweeping_the_wrong_way_is_a_notch_not_film() {
+        let ccw = Contour {
+            points: vec![Point { x: 10.0, y: 0.0 }, Point { x: -10.0, y: 0.0 }],
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: 10.0,
+                ccw: true,
+            }],
+            closed: true,
+        };
+        let cw = Contour {
+            points: ccw.points.clone(),
+            closed: true,
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: 10.0,
+                ccw: false,
+            }],
+        };
+        // Reversing the direction of travel puts the film on the other side of the
+        // chord, so the two areas are equal in size and opposite in sign. Both are
+        // segments; neither is the same shape as the other.
+        let (a, b) = (signed_contour_area(&ccw), signed_contour_area(&cw));
+        assert!((a + b).abs() < 1e-9, "mirrors should cancel: {a} and {b}");
+        assert!(
+            a.abs() > 100.0,
+            "and both should be substantial: {a} and {b}"
+        );
+        assert!(a * b < 0.0, "with opposite signs: {a} and {b}");
+    }
+
+    #[test]
+    fn an_arc_wider_than_a_half_turn_is_measured_from_its_own_sweep() {
+        // Three points so the long way round is actually determined: from
+        // (10, 0) clockwise to (0, 10) passes through (7.07, -7.07) and sweeps
+        // 270°, not the 90° the other way. Taking the short way would report a
+        // twelfth of the real shape.
+        //
+        // With only two points the geometry is genuinely ambiguous — nothing says
+        // which way round — so this needs the third point to be a real test.
+        let contour = Contour {
+            points: vec![
+                Point { x: 10.0, y: 0.0 },
+                Point {
+                    x: 7.0710678,
+                    y: -7.0710678,
+                },
+                Point { x: 0.0, y: 10.0 },
+            ],
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 2,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: 10.0,
+                ccw: false,
+            }],
+            closed: true,
+        };
+        let sweep = crate::geom::arc_sweep(&contour.arcs[0], contour.points[0], contour.points[2]);
+        assert!(
+            (sweep + 3.0 * std::f64::consts::FRAC_PI_2).abs() < 1e-4,
+            "sweep was {sweep}"
+        );
+    }
+
+    #[test]
+    fn two_points_and_one_arc_is_a_lens_not_nothing() {
+        // Pinned because the guard that rejected it looked obviously right: a
+        // polygon needs three points, and nobody was looking at a two-point
+        // contour holding an arc.
+        let contour = Contour {
+            points: vec![Point { x: 10.0, y: 0.0 }, Point { x: -10.0, y: 0.0 }],
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: 10.0,
+                ccw: true,
+            }],
+            closed: true,
+        };
+        let area = signed_contour_area(&contour).abs();
+        // The chord is the diameter, so the segment is the half disc.
+        let expected = std::f64::consts::PI * 100.0 / 2.0;
+        assert!(
+            (area - expected).abs() < 1e-9,
+            "got {area} against {expected}"
         );
     }
 

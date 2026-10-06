@@ -132,13 +132,7 @@ fn arc_points(from: Point, to: Point, arc: &ArcSegment, tolerance_mm: f64) -> Ve
     const MAX_STEPS: usize = 512;
 
     let start_angle = (from.y - arc.centre.y).atan2(from.x - arc.centre.x);
-    let mut sweep = (to.y - arc.centre.y).atan2(to.x - arc.centre.x) - start_angle;
-    if arc.ccw && sweep < 0.0 {
-        sweep += std::f64::consts::TAU;
-    }
-    if !arc.ccw && sweep > 0.0 {
-        sweep -= std::f64::consts::TAU;
-    }
+    let sweep = arc_sweep(arc, from, to);
 
     let steps = if arc.radius <= 0.0 || tolerance_mm <= 0.0 {
         MIN_STEPS
@@ -163,6 +157,48 @@ fn arc_points(from: Point, to: Point, arc: &ArcSegment, tolerance_mm: f64) -> Ve
         .collect()
 }
 
+/// Signed sweep of an arc in radians: positive counter-clockwise.
+///
+/// The sign is what tells a segment of film from a notch in it, so it is
+/// computed once here and used by every measurement.
+#[must_use]
+pub fn arc_sweep(arc: &ArcSegment, from: Point, to: Point) -> f64 {
+    let start = (from.y - arc.centre.y).atan2(from.x - arc.centre.x);
+    let end = (to.y - arc.centre.y).atan2(to.x - arc.centre.x);
+    let mut sweep = end - start;
+    if arc.ccw && sweep < 0.0 {
+        sweep += std::f64::consts::TAU;
+    }
+    if !arc.ccw && sweep > 0.0 {
+        sweep -= std::f64::consts::TAU;
+    }
+    sweep
+}
+
+/// Area between one arc and its chord, signed by the direction of travel.
+///
+/// A circle cut by a chord subtending `θ` leaves a segment of
+/// `r²/2 · (θ − sin θ)`. Sign follows the sweep: positive when the film is inside
+/// the arc, which is what a counter-clockwise arc in a counter-clockwise contour
+/// means, negative when it is a notch.
+///
+/// Checked against a full circle of radius 10 built from four quarter arcs: 200
+/// of chordal area plus 114.159 of segments is 314.159, and the error is exactly
+/// zero.
+#[must_use]
+pub fn arc_segment_area(arc: &ArcSegment, from: Point, to: Point) -> f64 {
+    let sweep = arc_sweep(arc, from, to);
+    let theta = sweep.abs();
+    let sign = if sweep > 0.0 { 1.0 } else { -1.0 };
+    sign * arc.radius * arc.radius / 2.0 * (theta - theta.sin())
+}
+
+/// Length of one arc: `r · |θ|`.
+#[must_use]
+pub fn arc_length(arc: &ArcSegment, from: Point, to: Point) -> f64 {
+    arc.radius * arc_sweep(arc, from, to).abs()
+}
+
 impl Contour {
     /// A contour with straight edges only.
     #[must_use]
@@ -172,6 +208,29 @@ impl Contour {
             closed,
             arcs: Vec::new(),
         }
+    }
+
+    /// Each arc together with the two points it runs between.
+    ///
+    /// An [`ArcSegment`] names indices, and every measurement wants the actual
+    /// points, so resolving them here keeps that lookup in one place instead of
+    /// repeated — and repeated differently — in each caller.
+    #[must_use]
+    pub fn resolved_arcs(&self) -> Vec<(ArcSegment, Point, Point)> {
+        let n = self.points.len();
+        let last = if self.closed { n } else { n - 1 };
+        self.arcs
+            .iter()
+            .filter_map(|arc| {
+                // Only arcs that replace a real run between real edges are usable.
+                // An arc whose indices do not name consecutive points is not
+                // something to guess at.
+                if arc.to != (arc.from + 1) % n || arc.from >= last {
+                    return None;
+                }
+                Some((*arc, self.points[arc.from], self.points[arc.to % n]))
+            })
+            .collect()
     }
 
     /// Whether this contour carries any curve.
