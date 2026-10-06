@@ -278,6 +278,7 @@ pub fn round_corners(
 
         let snapshot = contour.clone();
         let mut points: Vec<Point> = Vec::with_capacity(snapshot.points.len() + 32);
+        let mut fillets: Vec<Fillet> = Vec::new();
         let mut cursor = 0usize;
 
         for corner in corners {
@@ -286,11 +287,18 @@ pub fn round_corners(
             if corner.vertex < cursor {
                 continue;
             }
-            points.extend_from_slice(&snapshot.points[cursor..=corner.vertex - 1]);
+            // `corner.vertex - 1` underflowed whenever the first vertex was itself
+            // sharp, which is not a corner one can rule out: it is simply the one at
+            // index 0. The range is empty in that case and this expresses that
+            // directly.
+            if corner.vertex > cursor {
+                points.extend_from_slice(&snapshot.points[cursor..corner.vertex]);
+            }
 
-            match fillet_at(&snapshot, corner.vertex, radius_mm, curve_tolerance_mm) {
-                Some(arc) => {
-                    points.extend_from_slice(&arc);
+            match fillet_at(&snapshot, corner.vertex, radius_mm) {
+                Some(fillet) => {
+                    points.extend_from_slice(&[fillet.a, fillet.b]);
+                    fillets.push(fillet);
                     cursor = corner.vertex + 1;
                     rounded += 1;
                 }
@@ -308,12 +316,35 @@ pub fn round_corners(
         }
         points.extend_from_slice(&snapshot.points[cursor..]);
 
+        // The arc indices have to be resolved after the dedupe, not before: dedupe
+        // shifts every position, so an arc anchored during assembly would point at
+        // the wrong vertex. A fillet whose tangent point vanished as a duplicate is
+        // dropped rather than re-anchored onto a point that no longer means it did.
+        let points = dedupe(points, curve_tolerance_mm);
+        let arcs = fillets
+            .iter()
+            .filter_map(|fillet| {
+                let from = points
+                    .iter()
+                    .position(|p| p.distance_to(fillet.a) <= crate::constants::GEOM_EPS_MM)?;
+                let to = (from + 1) % points.len();
+                if points[to].distance_to(fillet.b) > crate::constants::GEOM_EPS_MM {
+                    return None;
+                }
+                Some(crate::geom::ArcSegment {
+                    from,
+                    to,
+                    centre: fillet.centre,
+                    radius: fillet.radius,
+                    ccw: true,
+                })
+            })
+            .collect();
+
         *contour = Contour {
-            points: dedupe(points, curve_tolerance_mm),
+            points,
             closed: contour.closed,
-            // A fillet is emitted as segments, and the vertex indices the arcs were
-            // anchored to have shifted underneath them.
-            arcs: Vec::new(),
+            arcs,
         };
     }
 
@@ -330,12 +361,17 @@ pub fn round_corners(
 /// Returns `None` when the neighbouring edges are too short to carry the tangent
 /// points. Clamping instead would produce a fillet that does not meet both edges
 /// and leave a sliver of film narrower than the knife can hold.
-fn fillet_at(
-    contour: &Contour,
-    vertex: usize,
-    radius_mm: f64,
-    tolerance_mm: f64,
-) -> Option<Vec<Point>> {
+/// A fillet, as the arc it actually is.
+struct Fillet {
+    /// Tangent point on the incoming edge.
+    a: Point,
+    /// Tangent point on the outgoing edge.
+    b: Point,
+    centre: Point,
+    radius: f64,
+}
+
+fn fillet_at(contour: &Contour, vertex: usize, radius_mm: f64) -> Option<Fillet> {
     let points = &contour.points;
     let n = points.len();
     if n < 3 || vertex >= n {
@@ -415,21 +451,15 @@ fn fillet_at(
         return None;
     }
 
-    let sweep = std::f64::consts::PI - interior;
-    let steps = arc_steps(radius_mm, sweep, tolerance_mm);
-    let angle_a = (a.y - centre.y).atan2(a.x - centre.x);
-
-    let mut arc = Vec::with_capacity(steps + 2);
-    arc.push(a);
-    for step in 1..steps {
-        let t = angle_a + sweep * (step as f64) / (steps as f64);
-        arc.push(Point {
-            x: centre.x + radius_mm * t.cos(),
-            y: centre.y + radius_mm * t.sin(),
-        });
-    }
-    arc.push(b);
-    Some(arc)
+    // The sweep runs anticlockwise from a to b: the existing code stepped the angle
+    // upwards, and the tangent check above already proved the arc is tangent to both
+    // edges, so there is nothing left to decide.
+    Some(Fillet {
+        a,
+        b,
+        centre,
+        radius: radius_mm,
+    })
 }
 
 /// `tan`, rejecting angles where it would lose all precision.
@@ -438,25 +468,6 @@ fn tan_half(half: f64) -> Option<f64> {
         return None;
     }
     Some(half.tan())
-}
-
-/// How many segments approximate an arc within a sagitta tolerance.
-///
-/// Solves `r(1 - cos(step/2)) <= tolerance` for the step angle. A tolerance at or
-/// beyond the radius would ask for a single chord, so it is floored at one
-/// segment, and the count is capped so a zero tolerance cannot ask for millions.
-fn arc_steps(radius_mm: f64, sweep: f64, tolerance_mm: f64) -> usize {
-    const MAX_STEPS: usize = 256;
-
-    if radius_mm <= 0.0 || sweep <= 0.0 {
-        return 1;
-    }
-    let ratio = (tolerance_mm / radius_mm).clamp(0.0, 1.0);
-    let max_step = 2.0 * (1.0 - ratio).acos();
-    if !max_step.is_finite() || max_step <= 0.0 {
-        return MAX_STEPS;
-    }
-    ((sweep / max_step).ceil() as usize).clamp(1, MAX_STEPS)
 }
 
 /// Remove points closer together than the tolerance.
@@ -809,16 +820,80 @@ mod tests {
         assert!(rounded.shapes[0].outer.points.len() >= 3);
     }
 
+    /// A fillet must come out as an arc, not as a chain of chords.
+    ///
+    /// A square is not a sharp-cornered shape, so this raises the threshold above
+    /// 90° rather than pretending a square is spiky. What matters is that the four
+    /// corners each become one arc with the radius asked for.
     #[test]
-    fn arc_segments_stay_within_the_tolerance() {
-        // The whole reason for a tolerance parameter: a coarse arc cuts the corner
-        // differently from a fine one, and the coarse one must still be a valid
-        // approximation rather than a chord through the wrong place.
-        let coarse = arc_steps(1.0, std::f64::consts::FRAC_PI_2, 0.20);
-        let fine = arc_steps(1.0, std::f64::consts::FRAC_PI_2, 0.001);
-        assert!(fine > coarse, "a tighter tolerance needs more segments");
-        assert!(coarse >= 1);
-        assert!(fine <= 256, "and must stay bounded");
+    fn a_rounded_corner_is_an_arc_and_not_a_chain_of_chords() {
+        let shapes = Shapes::single(square(0.0, 0.0, 10.0));
+        let (rounded, report) = round_corners(&shapes, 1.0, 100.0, 0.05);
+        let outer = &rounded.shapes[0].outer;
+
+        assert!(
+            matches!(report, RoundReport::Complete { rounded: 4 }),
+            "got {report:?}"
+        );
+        assert_eq!(
+            outer.arcs.len(),
+            4,
+            "one arc per corner, got {:?}",
+            outer.arcs
+        );
+        assert!(
+            outer.arcs.iter().all(|a| (a.radius - 1.0).abs() < 1e-9),
+            "every arc must carry the radius that was asked for"
+        );
+
+        // If these were chords the boundary would have collapsed to nothing special:
+        // 8 points and no arcs. Instead the fillets survive as arcs, which is why
+        // the measured area is the arc's and not the polygon's.
+        assert_eq!(
+            outer.points.len(),
+            8,
+            "each corner contributes two tangent points"
+        );
+    }
+
+    /// The point of storing an arc: the area is now the arc's area, not the
+    /// approximation's, so it no longer depends on a tessellation tolerance.
+    #[test]
+    fn the_fillet_area_does_not_depend_on_the_tolerance() {
+        let shapes = Shapes::single(square(0.0, 0.0, 10.0));
+        let area_of = |tol| {
+            let (r, _) = round_corners(&shapes, 1.0, 100.0, tol);
+            crate::measure::shapes_area(&r)
+        };
+
+        let coarse = area_of(0.50);
+        let fine = area_of(0.01);
+        assert!(
+            (coarse - fine).abs() < 1e-12,
+            "the geometry is the arc, so the tolerance cannot change it: {coarse} against {fine}"
+        );
+
+        // And it is the arc's area, not the chords': rounding a square's corners with
+        // 1 mm arcs removes 4 - pi mm^2 from it.
+        let rounded_area = fine;
+        let expected = 100.0 - (4.0 - std::f64::consts::PI);
+        assert!(
+            (rounded_area - expected).abs() < 1e-6,
+            "expected {expected}, got {rounded_area}"
+        );
+    }
+
+    /// A contour whose first vertex is itself sharp must not fall over.
+    ///
+    /// The slice `points[cursor..=corner.vertex - 1]` underflowed there, so
+    /// `round_corners` panicked instead of rounding. Raising the threshold makes
+    /// vertex 0 sharp and reaches it; nothing about the shape had to change.
+    #[test]
+    fn a_sharp_corner_at_the_first_vertex_is_rounded_not_a_panic() {
+        let shapes = Shapes::single(square(0.0, 0.0, 10.0));
+        let (rounded, report) = round_corners(&shapes, 1.0, 100.0, 0.05);
+        assert!(matches!(report, RoundReport::Complete { rounded: 4 }));
+        assert!(rounded.shapes[0].outer.arcs.iter().any(|a| a.from == 0));
     }
 
     #[test]
