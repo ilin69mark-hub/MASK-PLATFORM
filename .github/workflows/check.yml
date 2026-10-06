@@ -1,0 +1,70 @@
+name: check
+
+# The gate is `make check`, run in the repository rather than duplicated here.
+#
+# Duplicating the steps in YAML is how a pipeline and a local gate drift apart, and
+# then a green badge means nothing: someone adds a target to `check` and the badge
+# keeps passing because the pipeline never ran it. One source, one command.
+#
+# The toolchain is pinned the same way `rust-toolchain.toml` pins it for local work,
+# so a failure here is a failure about the code rather than about the environment.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per ref. A superseded push is not worth finishing.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # wasm-pack is a separate binary from cargo; `make check` calls it bare.
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `make schema` and `make schema-check` need `jsonschema`. Both scripts exit
+      # with an explicit message when it is missing, so the failure is legible rather
+      # than a stack trace — but the dependency still has to be declared somewhere,
+      # and this is the somewhere.
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "jsonschema>=4"
+
+      # Caching is keyed on the lockfile and the workspace manifest rather than on
+      # the target directory, so a stale artifact can never outlive a dependency
+      # change.
+      - name: Cache cargo and npm
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+            web/node_modules
+          key: ${{ runner.os }}-${{ hashFiles('engine/Cargo.lock', 'web/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-
+
+      - name: Check
+        run: make check
