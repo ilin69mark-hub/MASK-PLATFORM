@@ -29,6 +29,14 @@ pub struct PltDevice {
     pub blade_offset_mm: f64,
     /// Kerf, recorded as a comment so the file is self-describing.
     pub kerf_mm: f64,
+    /// Chord tolerance for curves, from the blade profile.
+    ///
+    /// HPGL has no arc command in the subset a knife plotter drives, so a curve
+    /// has to arrive tessellated. This is the tolerance it is tessellated at, and it
+    /// is written into the file as a comment: the points in a PLT are a
+    /// reconstruction of the geometry, not the geometry, and a bench worker opening
+    /// the file should not have to guess which of the two they are cutting.
+    pub curve_tolerance_mm: f64,
 }
 
 impl PltDevice {
@@ -52,6 +60,7 @@ impl PltDevice {
             speed_corner: (speed_straight as f64 * CORNER_SPEED_FACTOR).round() as u16,
             blade_offset_mm: plotter.blade.offset_mm,
             kerf_mm: plotter.blade.kerf_mm,
+            curve_tolerance_mm: plotter.blade.curve_tolerance_mm,
         }
     }
 }
@@ -70,6 +79,10 @@ pub fn to_plt(content: &PltContent, device: PltDevice, layer_name: &str) -> Stri
 
     // Header: identify the source, then initialise.
     out.push_str(&format!("IN;SP1;\n!{layer_name}\n"));
+    out.push_str(&format!(
+        "!curve-tolerance={:.4}mm (HPGL carries no arc; curves are cut as chords)\n",
+        device.curve_tolerance_mm
+    ));
     out.push_str(&format!(
         "!material-kerf={:.4}mm blade-offset={:.4}mm engine=mask-plot\n",
         device.kerf_mm, device.blade_offset_mm
@@ -98,8 +111,17 @@ fn emit_section(out: &mut String, shapes: &Shapes, device: PltDevice) {
     let mut cursor = (0.0_f64, 0.0_f64);
     let mut endpoints: Vec<[(f64, f64); 2]> = Vec::new();
 
+    // Flatten once, before anything reads a point.
+    //
+    // This used to read `.points` and draw the chords. HPGL carries no arc for a
+    // knife to follow, so that was the only thing it could have drawn — but it drew
+    // it silently, at the chord tolerance of whatever the geometry happened to be,
+    // and the file said nothing. Now the blade's own tolerance decides the step, and
+    // the header says so.
+    let flat = shapes.flattened(device.curve_tolerance_mm);
+
     // Collect contours first so travel order can be optimised.
-    for shape in &shapes.shapes {
+    for shape in &flat.shapes {
         for contour in std::iter::once(&shape.outer).chain(shape.holes.iter()) {
             if contour.points.len() >= 2 {
                 let first = contour.points.first().expect("non-empty");
@@ -111,7 +133,7 @@ fn emit_section(out: &mut String, shapes: &Shapes, device: PltDevice) {
 
     let order = nearest_neighbour_order(&endpoints);
 
-    let contours: Vec<&Contour> = shapes
+    let contours: Vec<&Contour> = flat
         .shapes
         .iter()
         .flat_map(|s| std::iter::once(&s.outer).chain(s.holes.iter()))
@@ -227,6 +249,7 @@ mod tests {
             speed_corner: 18,
             blade_offset_mm: 0.10,
             kerf_mm: 0.15,
+            curve_tolerance_mm: 0.08,
         }
     }
 
@@ -394,5 +417,86 @@ mod tests {
         let d = PltDevice::from_profile(&plotter, 40.0, 30);
         assert_eq!(d.speed_straight, 30);
         assert_eq!(d.speed_corner, 18, "corners run slower than straights");
+    }
+    use mask_kernel::geom::{ArcSegment, Contour};
+
+    /// A circle of four quarter arcs: 4 points, and a boundary that is emphatically
+    /// not the polygon through them.
+    fn curved_disc(r: f64) -> Shapes {
+        let points = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (f64::from(i));
+                Point {
+                    x: r * a.cos(),
+                    y: r * a.sin(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: r,
+                ccw: true,
+            })
+            .collect();
+        Shapes::single(Shape::new(Contour {
+            points,
+            closed: true,
+            arcs,
+        }))
+    }
+
+    fn curves_content() -> PltContent {
+        PltContent {
+            cut: curved_disc(10.0),
+            registration: Shapes::new(),
+        }
+    }
+
+    /// The blade must cut the curve, not the four chords.
+    ///
+    /// A PLT is a list of pen positions, so the only thing that can distinguish a
+    /// curve from its chords is how many points are between the corners. Four means
+    /// the chords were drawn; more means the curve was.
+    #[test]
+    fn the_plt_actually_steps_along_a_curve() {
+        let plt = to_plt(&curves_content(), device(), "arcs");
+        let moves = plt.matches("PA").count();
+        assert!(
+            moves > 20,
+            "a circle flattened at 0.08 mm needs dozens of pen moves, found {moves}"
+        );
+    }
+
+    /// And it must not step along the chords when the caller already flattened at a
+    /// tolerance of their own, or the two stages would silently compound.
+    #[test]
+    fn an_already_flat_contour_is_left_alone() {
+        let pre_flattened = PltContent {
+            cut: curved_disc(10.0).flattened(0.05),
+            ..curves_content()
+        };
+        let plt = to_plt(&pre_flattened, device(), "arcs");
+        assert!(
+            plt.matches("PA").count() > 20,
+            "a pre-flattened curve is still a curve"
+        );
+    }
+
+    /// The file has to say it is a reconstruction. Somebody at the bench reading
+    /// points in a PLT cannot otherwise tell a tessellated circle from a circle.
+    #[test]
+    fn the_file_declares_that_curves_were_flattened() {
+        let plt = to_plt(&curves_content(), device(), "arcs");
+        assert!(
+            plt.contains("!curve-tolerance=0.0800mm"),
+            "the tolerance must be in the file:\n{plt}"
+        );
+        assert!(
+            plt.contains("no arc"),
+            "and it must say what that means: {plt}"
+        );
     }
 }

@@ -66,6 +66,18 @@ pub fn to_dxf(content: &DxfContent, tolerance_mm: f64) -> String {
 
     // ── HEADER ────────────────────────────────────────────────────────
     pair(&mut out, 999, "MASK PLATFORM production file");
+    // The R12 target has no arc entity for a knife to follow, so curves arrive as
+    // POLYLINE vertices. Without this line a reader cannot tell a tessellated
+    // circle from a circle, and every point in the file looks like original
+    // geometry. The tolerance is the blade's, so the approximation belongs to the
+    // machine that has to cut it.
+    pair(
+        &mut out,
+        999,
+        &format!(
+            "curves flattened at {tolerance_mm:.4}mm chord tolerance (DXF R12 carries no arc entity)"
+        ),
+    );
     pair(&mut out, 0, "SECTION");
     pair(&mut out, 2, "HEADER");
     // $ACADVER = AC1009 (R12)
@@ -156,8 +168,14 @@ fn emit_polyline(out: &mut String, contour: &Contour, layer: DxfLayer, tolerance
 /// already tessellated. Collapsing duplicates here rather than trusting the
 /// writer keeps the vertex count honest.
 fn flatten(contour: &Contour, tolerance_mm: f64) -> Vec<mask_kernel::Point> {
-    let mut out: Vec<mask_kernel::Point> = Vec::with_capacity(contour.points.len());
-    for p in &contour.points {
+    // Tessellate first. This function used to walk `contour.points` and call
+    // itself flatten, and this module's header claimed curves were flattened at the
+    // plotter tolerance. They were not: a circle of four quarter arcs was written
+    // as four vertices, the inscribed square, in a file that said it had been
+    // flattened. The claim in the documentation was false and so was the file.
+    let tessellated = contour.flattened(tolerance_mm);
+    let mut out: Vec<mask_kernel::Point> = Vec::with_capacity(tessellated.points.len());
+    for p in &tessellated.points {
         if let Some(last) = out.last() {
             if last.distance_to(*p) <= tolerance_mm.max(mask_kernel::COLLINEAR_MM) {
                 continue;
@@ -474,6 +492,78 @@ mod tests {
     fn a_malformed_file_is_rejected_rather_than_partially_read() {
         let err = from_dxf("not a dxf at all").unwrap_err();
         assert!(err.contains("no geometry"), "{err}");
+    }
+
+    /// A function called `flatten` that does not flatten.
+    ///
+    /// This one walked `contour.points` and dropped duplicates — no arcs, no
+    /// tessellation. A circle of four quarter arcs came out as four vertices: the
+    /// inscribed square, in a production file whose header said curves were
+    /// flattened at the plotter tolerance. Both halves were wrong, and the
+    /// documentation made the second half look correct.
+    ///
+    /// The vertex count is the whole assertion: four is the chords, more than four
+    /// is the curve.
+    #[test]
+    fn a_circle_reaches_the_file_as_a_curve_and_not_as_its_chords() {
+        use mask_kernel::geom::{ArcSegment, Point, Shape};
+        let r = 20.0;
+        let points: Vec<Point> = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (f64::from(i));
+                Point {
+                    x: r * a.cos(),
+                    y: r * a.sin(),
+                }
+            })
+            .collect();
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius: r,
+                ccw: true,
+            })
+            .collect();
+        let circle = Shapes::single(Shape::new(Contour {
+            points,
+            closed: true,
+            arcs,
+        }));
+        let dxf = to_dxf(
+            &DxfContent {
+                cut: circle,
+                registration: Shapes::new(),
+            },
+            0.08,
+        );
+
+        let vertices = dxf.matches("\nVERTEX\r\n").count();
+        assert!(
+            vertices > 20,
+            "a circle flattened at 0.08 mm needs dozens of vertices, found {vertices}"
+        );
+        assert!(
+            !dxf.contains("\nLWPOLYLINE\r\n"),
+            "R12 has no LWPOLYLINE, whatever it costs us"
+        );
+    }
+
+    /// A DXF whose curves were tessellated has to say so.
+    ///
+    /// R12 has no ARC, so this writer flattens at the blade's tolerance and has
+    /// always said so in its own documentation — which is not the same as saying it
+    /// in the file. A reader opening the DXF sees points, and nothing in the file
+    /// distinguishes points that were a circle from points that were a polygon.
+    #[test]
+    fn the_file_declares_the_curve_tolerance_it_used() {
+        let dxf = to_dxf(&content(), 0.08);
+        assert!(
+            dxf.contains("curves flattened at 0.0800mm chord tolerance"),
+            "the tolerance must be in the file:\n{}",
+            dxf.lines().take(8).collect::<Vec<_>>().join("\n")
+        );
     }
 
     #[test]
