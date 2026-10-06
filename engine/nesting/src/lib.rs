@@ -19,6 +19,23 @@ pub enum NestError {
     #[error("geometry exceeds the {limit} mm coordinate bound")]
     OutOfBounds { limit: f64 },
 
+    /// The layer carries curves and a boolean operation cannot take them.
+    ///
+    /// Its own variant rather than a flattened string, because it was previously
+    /// reported as [`NestError::OutOfBounds`] — the operator was told a 600 mm band
+    /// exceeded a 100 000 mm limit, which is false, and the fix it implies
+    /// (shrink the drawing) is the opposite of the one that works (flatten at the
+    /// tolerance the plotter profile already states).
+    ///
+    /// Flattening is the caller's decision: it changes geometry, and a caller that
+    /// does it silently would be asserting a tolerance nobody chose.
+    #[error("cannot nest a layer that carries curves: flatten it first at the plotter profile's curve tolerance")]
+    CurvedGeometry,
+
+    /// The geometry library refused the input for a reason of its own.
+    #[error("the geometry library rejected this layer: {0}")]
+    Rejected(String),
+
     #[error("field is too small to hold any content: {0} mm")]
     FieldTooSmall(f64),
 
@@ -217,10 +234,16 @@ pub fn fixed_grid(layer: &Shapes, request: NestRequest) -> Result<NestingPlan, N
                 arcs: Vec::new(),
             }));
 
-            let content =
-                mask_kernel::intersection(layer, &window).map_err(|_| NestError::OutOfBounds {
-                    limit: mask_kernel::MAX_COORDINATE_MM,
-                })?;
+            // Each cause keeps its own meaning. `|_|` here discarded four distinct
+            // failures and reported all of them as a coordinate bound, so the message
+            // named a limit the geometry was nowhere near.
+            let content = mask_kernel::intersection(layer, &window).map_err(|e| match e {
+                mask_kernel::OverlayError::CurvedGeometry => NestError::CurvedGeometry,
+                mask_kernel::OverlayError::OutOfBounds { limit } => {
+                    NestError::OutOfBounds { limit }
+                }
+                other => NestError::Rejected(other.to_string()),
+            })?;
 
             tiles.push(Tile {
                 id,
@@ -324,6 +347,39 @@ mod tests {
     /// A long horizontal band of the given overall size.
     fn band(length: f64, width: f64) -> Shapes {
         widen(&[p(0.0, 0.0), p(length, 0.0)], width).unwrap()
+    }
+
+    /// Reproduces the misreport: a layer carrying a curve asked to nest.
+    ///
+    /// `intersection` refuses polygonal-only input with `CurvedGeometry`, whose
+    /// message names the fix — flatten at the plotter's tolerance. Nesting collapsed
+    /// every `OverlayError` into `OutOfBounds`, so the operator was told the
+    /// coordinates were too large, and the action implied by that message is the
+    /// opposite of the one that works.
+    #[test]
+    fn a_curve_is_reported_as_a_curve_and_not_as_a_coordinate_bound() {
+        let mut shapes = band(600.0, 2.0);
+        // A real fillet, as `round_corners` produces.
+        shapes.shapes[0].outer.arcs = vec![mask_kernel::ArcSegment {
+            from: 0,
+            to: 1,
+            centre: p(0.0, -1.0),
+            radius: 1.0,
+            ccw: true,
+        }];
+
+        let err = fixed_grid(&shapes, request())
+            .expect_err("a curve cannot go through a polygon boolean");
+        let text = err.to_string();
+
+        assert!(
+            text.contains("polygonal") || text.contains("curves"),
+            "the message must name the curve and the fix, not the coordinates: {text}"
+        );
+        assert!(
+            !text.contains("coordinate bound"),
+            "a 600 mm band is nowhere near the coordinate limit; saying so is the bug: {text}"
+        );
     }
 
     #[test]
