@@ -19,7 +19,7 @@ use mask_kernel::{union, widen, Contour, Point, Shape, Shapes};
 use mask_nesting::{fixed_grid, needs_nesting, NestRequest};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
-use mask_validate::{render, validate_with_nesting, LayerInput, Rect4};
+use mask_validate::{render, validate_with_registration, LayerInput, Rect4};
 
 /// Version stamped into every artifact, so reproduction can be verified later.
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -727,7 +727,24 @@ fn run(args: &Args) -> Result<bool, String> {
         );
     }
 
-    let report = validate_with_nesting(&layers, &profile, &rules, verified, &tile_rects);
+    // Registration anchors, one per nested layer: where its first tile sits on
+    // the sheet. Layers nested from the same origin share one, and T-15 reports
+    // the difference between any two that do not.
+    let mut anchors: std::collections::BTreeMap<u32, Point> = std::collections::BTreeMap::new();
+    for (index, _, plan) in &plans {
+        if let Some(first) = plan.tiles.first() {
+            anchors.insert(
+                *index,
+                Point {
+                    x: first.marks.part_anchor.left.x_mm,
+                    y: first.marks.part_anchor.left.y_mm,
+                },
+            );
+        }
+    }
+
+    let report =
+        validate_with_registration(&layers, &profile, &rules, verified, &tile_rects, &anchors);
 
     println!("Measured:");
     for m in &report.layers {

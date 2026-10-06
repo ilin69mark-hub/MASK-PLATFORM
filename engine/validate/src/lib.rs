@@ -290,6 +290,33 @@ pub fn validate_with_nesting(
     limits_physically_verified: bool,
     nested_tiles: &BTreeMap<u32, Vec<Rect4>>,
 ) -> ValidationReport {
+    validate_with_registration(
+        layers,
+        profile,
+        rules,
+        limits_physically_verified,
+        nested_tiles,
+        &BTreeMap::new(),
+    )
+}
+
+/// Validate, additionally knowing where each layer's registration anchor sits on
+/// the part.
+///
+/// T-15 needs this and nothing else does, so the anchors travel separately rather
+/// than widening the tile map. Layers printed from the same nesting origin share an
+/// anchor and contribute nothing; layers nested differently do not, and the
+/// difference between those two is exactly the registration error the bench worker
+/// will have to absorb.
+#[must_use]
+pub fn validate_with_registration(
+    layers: &[LayerInput],
+    profile: &CuttingProfile,
+    rules: &RuleSet,
+    limits_physically_verified: bool,
+    nested_tiles: &BTreeMap<u32, Vec<Rect4>>,
+    anchors: &BTreeMap<u32, Point>,
+) -> ValidationReport {
     let mut violations = Vec::new();
     let mut metrics = Vec::new();
 
@@ -354,6 +381,42 @@ pub fn validate_with_nesting(
                 estimated_fidelity_loss: None,
             }],
         });
+    }
+
+    // registration (T-15) — the layers have to land on top of each other.
+    //
+    // Two errors add up: what the plotter itself can hold, and what the geometry
+    // adds when layers are nested from different origins. The material's
+    // tolerance is the budget both have to fit inside.
+    if let Some(rule) = rules.rule("registration") {
+        let budget = profile.limits.registration_budget_mm;
+        let tool_error = profile.limits.registration_error_mm;
+        let geometric = worst_anchor_spread(anchors);
+
+        if tool_error + geometric > budget {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: None,
+                measured: Some(tool_error + geometric),
+                required: Some(budget),
+                unit: Unit::Mm,
+                count: 2,
+                headline: format!(
+                    "Слои не совместятся: {} от плоттера плюс {} от вложения — {}.",
+                    format_measurement(tool_error, budget),
+                    format_measurement(geometric, budget),
+                    format_measurement(tool_error + geometric, budget)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![Action {
+                    id: "show_marks".into(),
+                    label: "Показать метки".into(),
+                    primary: true,
+                    estimated_fidelity_loss: None,
+                }],
+            });
+        }
     }
 
     finish(violations, metrics, None, limits_physically_verified)
@@ -442,6 +505,21 @@ fn density_per_100cm2(shapes: &Shapes) -> f64 {
 
 /// A tile bounding box as `[min_x, min_y, width, height]`.
 pub type Rect4 = [f64; 4];
+
+/// The largest distance between any two layers' registration anchors.
+///
+/// Zero when fewer than two layers have one, which is the normal case: every
+/// layer is nested from the same origin and they land together by construction.
+fn worst_anchor_spread(anchors: &BTreeMap<u32, Point>) -> f64 {
+    let points: Vec<Point> = anchors.values().copied().collect();
+    let mut worst = 0.0_f64;
+    for (i, a) in points.iter().enumerate() {
+        for b in points.iter().skip(i + 1) {
+            worst = worst.max(a.distance_to(*b));
+        }
+    }
+    worst
+}
 
 /// Comparison band for dimension checks, in millimetres.
 ///
@@ -2113,6 +2191,102 @@ mod tests {
         let json = r#"{"index":1,"name":"Old","geometry":{"shapes":[]}}"#;
         let layer: LayerInput = serde_json::from_str(json).expect("old payloads stay readable");
         assert!(layer.bridges.is_empty());
+    }
+
+    fn two_layers() -> Vec<LayerInput> {
+        vec![band_layer(1, 0.80, 200.0), band_layer(2, 0.80, 200.0)]
+    }
+
+    fn anchors_at(points: &[(u32, f64, f64)]) -> BTreeMap<u32, Point> {
+        points
+            .iter()
+            .map(|(i, x, y)| (*i, Point { x: *x, y: *y }))
+            .collect()
+    }
+
+    #[test]
+    fn layers_nested_from_the_same_origin_register() {
+        // The plotter's own 0.30 mm fits inside the material's 0.35 mm budget, and
+        // both layers share an origin, so there is nothing to report.
+        let anchors = anchors_at(&[(1, 0.0, 0.0), (2, 0.0, 0.0)]);
+        let report = validate_with_registration(
+            &two_layers(),
+            &profile(),
+            &RuleSet::from_profile(&profile()),
+            true,
+            &BTreeMap::new(),
+            &anchors,
+        );
+        assert!(
+            !report.violations.iter().any(|v| v.code == "registration"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn layers_nested_from_different_origins_are_reported() {
+        // 0.4 mm of nesting difference on top of the plotter's 0.30 is 0.70 against
+        // a 0.35 budget. The layers would land visibly apart.
+        let anchors = anchors_at(&[(1, 0.0, 0.0), (2, 0.4, 0.0)]);
+        let report = validate_with_registration(
+            &two_layers(),
+            &profile(),
+            &RuleSet::from_profile(&profile()),
+            true,
+            &BTreeMap::new(),
+            &anchors,
+        );
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "registration")
+            .expect("a 0.4 mm anchor difference must be reported");
+        assert_eq!(v.severity, Severity::Error);
+        assert!(
+            (v.measured.expect("measured") - 0.70).abs() < 1e-6,
+            "{:?}",
+            v.measured
+        );
+        assert_eq!(v.required, Some(0.35));
+    }
+
+    #[test]
+    fn a_single_layer_never_has_a_registration_problem() {
+        // There is nothing to register against.
+        let anchors = anchors_at(&[(1, 99.0, 99.0)]);
+        let report = validate_with_registration(
+            &[band_layer(1, 0.80, 200.0)],
+            &profile(),
+            &RuleSet::from_profile(&profile()),
+            true,
+            &BTreeMap::new(),
+            &anchors,
+        );
+        assert!(!report.violations.iter().any(|v| v.code == "registration"));
+    }
+
+    #[test]
+    fn the_two_sources_of_error_are_reported_separately() {
+        // "It will not align" is not actionable; "the plotter costs 0.30 and the
+        // nesting adds 0.40" is, because one of those is fixable in this project and
+        // the other is not.
+        let anchors = anchors_at(&[(1, 0.0, 0.0), (2, 0.4, 0.0)]);
+        let report = validate_with_registration(
+            &two_layers(),
+            &profile(),
+            &RuleSet::from_profile(&profile()),
+            true,
+            &BTreeMap::new(),
+            &anchors,
+        );
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "registration")
+            .expect("v");
+        assert!(v.headline.contains("плоттера"), "{}", v.headline);
+        assert!(v.headline.contains("вложения"), "{}", v.headline);
     }
 
     #[test]

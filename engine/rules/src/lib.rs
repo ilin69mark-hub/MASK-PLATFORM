@@ -33,6 +33,8 @@ pub struct EffectiveLimits {
     pub max_tile_length_mm: f64,
     pub kerf_mm: f64,
     pub registration_error_mm: f64,
+    /// What the material can tolerate, from `physical.tolerance_registration_mm`.
+    pub registration_budget_mm: f64,
 }
 
 /// Material plus plotter plus the limits they jointly imply.
@@ -150,6 +152,7 @@ impl CuttingProfile {
                 max_tile_length_mm,
                 kerf_mm: b.kerf_mm,
                 registration_error_mm: plotter.accuracy.max_registration_error_mm,
+                registration_budget_mm: material.physical.tolerance_registration_mm,
             },
             derivation,
         }
@@ -217,6 +220,7 @@ impl Rule {
             "island_area_mm2" => limits.island_area_mm2,
             "feature_length_mm" => limits.feature_length_mm,
             "bridge_length_mm" => limits.bridge_length_mm,
+            "registration_budget_mm" => limits.registration_budget_mm,
             "corner_radius_mm" => limits.corner_radius_mm,
             "min_angle_deg" => limits.min_angle_deg,
             "bridge_width_mm" => limits.bridge_width_mm,
@@ -352,6 +356,15 @@ impl RuleSet {
                 threshold: "bridge_length_mm".into(),
                 headline: "{n} мостов длиннее {required} мм.".into(),
                 reason: "Слишком длинный мост оторвётся при снятии маски.".into(),
+            },
+            Rule {
+                code: "registration".into(),
+                severity: Severity::Error,
+                measure: Measure::MinGap,
+                auto_fixable: false,
+                threshold: "registration_budget_mm".into(),
+                headline: "{n} слоёв не совместятся: расхождение {} мм при бюджете {required} мм.".into(),
+                reason: "Слои лягут со смещением, и рисунок разъедется.".into(),
             },
             Rule {
                 code: "layer_density".into(),
