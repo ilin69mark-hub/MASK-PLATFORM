@@ -45,19 +45,28 @@ fmt: ## Format
 wasm: ## Verify the kernel builds for the browser
 	cd $(ENGINE) && $(CARGO) build -p mask-wasm --target wasm32-unknown-unknown
 
-web-install: ## Install web dependencies
-	cd $(ROOT)/web && npm install
+.PHONY: web-install
+web-install: ## Install web dependencies exactly as locked
+	cd $(ROOT)/web && npm ci
 
+.PHONY: web-typecheck
 web-typecheck: web-install ## Typecheck the web client
 	cd $(ROOT)/web && npx tsc --noEmit
 
+.PHONY: web-build
+# In `check` because `web-build` depends on `wasm-dist`, and without it a green
+# check cannot produce web/public/pkg/mask_wasm.js — the artifact the studio fetches.
+# A check that never builds the thing it protects is a check about the source rather
+# than about the product, and the failure it would have caught is a 404 in the browser.
 web-build: web-install wasm-dist ## Build the web client
 	cd $(ROOT)/web && npm run build
 
+.PHONY: web-contract
 web-contract: wasm-runtime ## Check the TS facade against the real kernel
 	cd $(ROOT)/web && node scripts/kernel-contract-check.mjs
 
-web-test: ## Run the facade tests against the real wasm artifact
+.PHONY: web-test
+web-test: wasm-runtime ## Run the facade tests against the real wasm artifact
 	cd $(ROOT)/web && node --experimental-strip-types --test tests/kernel.test.ts
 
 .PHONY: wasm-dist
@@ -125,4 +134,4 @@ wasm-check: ## Re-run the ADR-0003 wasm verification
 	cd $(SPIKE) && ./wasm_check.sh
 
 .PHONY: check
-check: lint test schema schema-check wasm wasm-runtime web-contract web-test web-typecheck ## Everything CI should run
+check: lint test schema schema-check wasm wasm-runtime web-contract web-test web-typecheck web-build ## Everything CI should run

@@ -75,12 +75,19 @@ export function StudioCanvas({
         if (!cancelled) setKernelReady(true);
       })
       .catch((e: unknown) => {
-        if (!cancelled) {
-          setMeasurement({
-            status: "error",
-            error: e instanceof Error ? e.message : String(e),
-          });
-        }
+        if (cancelled) return;
+        // `kernelReady` is set here as well as on success. It was not, and the
+        // status bar checks `!kernelReady` before it checks for an error — so a
+        // failed load left the editor reading "Загрузка геометрического ядра…"
+        // forever, with the captured message unreachable behind it. The most likely
+        // cause of that failure is a missing browser artifact, which is exactly the
+        // state `make check` can leave you in: it never runs `wasm-dist`, so a green
+        // check does not produce `/pkg/mask_wasm.js`.
+        setKernelReady(true);
+        setMeasurement({
+          status: "error",
+          error: e instanceof Error ? e.message : String(e),
+        });
       });
     return () => {
       cancelled = true;
@@ -307,15 +314,21 @@ function StatusBar({
   minGapMm: number;
   onDownload: () => void;
 }) {
-  if (!kernelReady) {
-    return <span className="muted">Загрузка геометрического ядра…</span>;
-  }
+  // The error branch comes first, and that is the order doing the work rather than
+  // an accident. Loading is the default state and an error is the exception to it,
+  // so the exception is asked about first: with the opposite order, a component that
+  // recorded an error without also marking itself ready would show "loading" for
+  // ever, and the message would sit unreachable behind the guard. That is not
+  // hypothetical — it is what this component did until the load failure was found.
   if (measurement.status === "error") {
     return (
       <span className="error" role="alert">
         {measurement.error}
       </span>
     );
+  }
+  if (!kernelReady) {
+    return <span className="muted">Загрузка геометрического ядра…</span>;
   }
   if (measurement.status !== "ready" || !measurement.result) {
     return <span className="muted">Измерение…</span>;
