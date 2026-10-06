@@ -119,6 +119,15 @@ pub fn format_measurement(measured: f64, required: f64) -> String {
     )
 }
 
+/// The same shape of message, in square millimetres.
+///
+/// Separate from the length version for the same reason as the degrees one: an
+/// island area printed with "мм" is a unit error in the line the operator reads.
+#[must_use]
+pub fn format_area(measured: f64, required: f64) -> String {
+    format!("{measured:.3} мм² (минимум {required:.3} мм²)")
+}
+
 /// The same shape of message, in degrees.
 ///
 /// A separate function rather than a unit parameter on the millimetre one,

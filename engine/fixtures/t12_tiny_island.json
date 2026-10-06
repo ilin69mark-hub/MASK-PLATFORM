@@ -1,0 +1,43 @@
+{
+  "project_id": "MASK-DEN-002",
+  "revision": 1,
+  "target": {
+    "object": "Island probe",
+    "part": "Flat",
+    "part_code": "DEN",
+    "dimensions_mm": [
+      40.0,
+      40.0
+    ]
+  },
+  "_comment": "TEST D2. A single 1x1 mm piece, 1 mm² against the 2.40 mm² minimum. Expected: min_island_area error.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Speck",
+      "regions": [
+        {
+          "outer": [
+            [
+              0,
+              0
+            ],
+            [
+              1.0,
+              0
+            ],
+            [
+              1.0,
+              1.0
+            ],
+            [
+              0,
+              1.0
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    }
+  ]
+}

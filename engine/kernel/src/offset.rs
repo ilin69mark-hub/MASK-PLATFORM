@@ -139,15 +139,38 @@ pub fn survives_inward_offset(shape: &Shapes, half_width_mm: f64) -> bool {
 
 /// Narrowest width of the shape, in millimetres.
 ///
+/// # What this measures, and what it does not
+///
 /// A mask element is a band of film of uniform thickness, so for a band that
 /// thickness is the shortest distance across it. The band collapses once the
 /// inward offset exceeds half its thickness, so the width is found by bisecting
 /// on the offset delta at which the result becomes empty, then doubling.
 ///
+/// **This finds the width of a shape that is one band. It does not find the
+/// narrowest neck.** A shape with a thin appendage reports the band's width, and a
+/// bridge tab joined to a large region reports the region's width, because the
+/// method looks for the largest inward offset that leaves *anything* behind. A
+/// thin neck survives that search: the surrounding mass keeps the result
+/// non-empty long after the neck has closed.
+///
+/// Measured, on a 4 mm band with a 0.2 mm whisker:
+///
+/// ```text
+/// plain 4 mm band        -> 4.000 mm
+/// band + 0.2 mm neck     -> 4.000 mm   <- the whisker is invisible
+/// ```
+///
+/// This is a real limitation of T-01 and it is stated rather than left for
+/// someone to discover through a mask that tears. Finding the true medial axis
+/// needs a distance transform or a per-part decomposition, neither of which is
+/// a local change to this function, so it has not been attempted here. The tests
+/// `a_thin_neck_is_invisible_and_that_is_pinned` and `a_plain_band_is_measured`
+/// exist to keep the limitation honest.
+///
 /// Bisection is used rather than a direct computation because it needs no
-/// assumption about the shape: a distance-field approach would be faster but
-/// only as accurate as the raster grid, and this must hold to the canonical
-/// grid (ADR-0004).
+/// assumption about the shape: a distance-field approach would be faster but only
+/// as accurate as the raster grid, and this must hold to the canonical grid
+/// (ADR-0004).
 ///
 /// Returns `None` for empty input.
 #[must_use]
@@ -198,6 +221,51 @@ mod tests {
             points: vec![p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)],
             closed: true,
         }))
+    }
+
+    #[test]
+    fn a_plain_band_is_measured() {
+        // The case this method is built for, and the one that works.
+        for w in [0.8, 1.2, 4.0] {
+            let band = rect(0.0, 0.0, 40.0, w);
+            let measured = min_width(&band).expect("a width");
+            assert!(
+                (measured - w).abs() < 1e-3,
+                "a {w} mm band measured {measured:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thin_neck_is_invisible_and_that_is_pinned() {
+        // Pinned deliberately: this is a known limitation, not a passing test of
+        // correct behaviour. A 4 mm band with a 0.2 mm whisker reports 4 mm,
+        // because the method finds the largest inward offset that leaves anything
+        // behind and the surrounding mass keeps doing that long after the whisker
+        // has closed.
+        //
+        // If this assertion ever starts failing, the method changed and the doc
+        // comment on `min_width` must change with it.
+        let band_with_whisker = Shapes::single(Shape::new(Contour {
+            points: vec![
+                p(0.0, 0.0),
+                p(40.0, 0.0),
+                p(40.0, 4.0),
+                p(20.1, 4.0),
+                p(20.0, 4.0),
+                p(20.0, 20.0),
+                p(19.9, 20.0),
+                p(19.9, 4.0),
+                p(0.0, 4.0),
+            ],
+            closed: true,
+        }));
+        let measured = min_width(&band_with_whisker).expect("a width");
+        assert!(
+            (measured - 4.0).abs() < 0.01,
+            "the whisker is expected to be missed, got {measured:.4}; \
+             if this is now measured, update the docs on min_width"
+        );
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub struct EffectiveLimits {
     pub line_width_mm: f64,
     pub gap_mm: f64,
     pub island_width_mm: f64,
+    /// Minimum island area, from `material.minimums.island_area_mm2`.
+    pub island_area_mm2: f64,
     pub corner_radius_mm: f64,
     /// Minimum interior angle, from `material.limits.min_angle_deg`.
     pub min_angle_deg: f64,
@@ -132,6 +134,7 @@ impl CuttingProfile {
                 line_width_mm,
                 gap_mm,
                 island_width_mm,
+                island_area_mm2: material.minimums.island_area_mm2,
                 corner_radius_mm,
                 min_angle_deg: material.limits.min_angle_deg,
                 bridge_width_mm,
@@ -205,6 +208,7 @@ impl Rule {
             "line_width_mm" => limits.line_width_mm,
             "gap_mm" => limits.gap_mm,
             "island_width_mm" => limits.island_width_mm,
+            "island_area_mm2" => limits.island_area_mm2,
             "corner_radius_mm" => limits.corner_radius_mm,
             "min_angle_deg" => limits.min_angle_deg,
             "bridge_width_mm" => limits.bridge_width_mm,
@@ -252,13 +256,22 @@ impl RuleSet {
                 reason: "Вырезы сольются или плёнка порвётся.".into(),
             },
             Rule {
-                code: "min_island".into(),
+                code: "min_island_width".into(),
                 severity: Severity::Error,
                 measure: Measure::IslandWidth,
                 auto_fixable: true,
                 threshold: "island_width_mm".into(),
-                headline: "{n} островков уже минимума {required} мм.".into(),
-                reason: "Островок такого размера не удержится на детали.".into(),
+                headline: "{n} уже минимальной ширины {required}.".into(),
+                reason: "Островок такой ширины не удержится на детали.".into(),
+            },
+            Rule {
+                code: "min_island_area".into(),
+                severity: Severity::Error,
+                measure: Measure::IslandWidth,
+                auto_fixable: true,
+                threshold: "island_area_mm2".into(),
+                headline: "{n} меньше {required}.".into(),
+                reason: "Слишком мало плёнки, чтобы держаться на детали.".into(),
             },
             Rule {
                 code: "island_anchored".into(),
@@ -321,7 +334,11 @@ impl RuleSet {
                 auto_fixable: false,
                 threshold: "max_features_per_100cm2".into(),
                 headline: "Слой {layer}: {n} элементов на 100 см² (максимум {required}). Вырезать вручную будет долго.".into(),
-                reason: "Слишком много мелких элементов для ручного выреза.".into(),
+                reason: "Слишком много мелых элементов для ручного выреза.".into(),
+                // T-13 is an upper bound, so the shared "measured / required"
+                // rendering would read as if the measurement were short of the
+                // limit when it is the other way round. The validator words it
+                // separately for this reason.
             },
             Rule {
                 code: "layer_fits_field".into(),

@@ -11,9 +11,9 @@
 //!    action (P-09). No error codes are shown in user-facing text.
 
 use mask_kernel::{
-    bounding_box, format_degrees, format_measurement, meets_threshold, min_gap, min_width,
-    open_cut_contours, self_intersections, shapes_area, sharp_corners, unanchored_islands, Contour,
-    Point, Shape, Shapes,
+    bounding_box, format_area, format_degrees, format_measurement, meets_threshold, min_gap,
+    min_width, open_cut_contours, self_intersections, shape_area, shapes_area, sharp_corners,
+    unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,10 @@ pub enum Unit {
     Mm,
     /// Degrees.
     Deg,
+    /// Square millimetres.
+    Mm2,
+    /// A plain count with no unit.
+    Count,
 }
 
 fn default_unit() -> Unit {
@@ -105,6 +109,8 @@ impl Unit {
         match self {
             Unit::Mm => "мм",
             Unit::Deg => "°",
+            Unit::Mm2 => "мм²",
+            Unit::Count => "",
         }
     }
 }
@@ -171,6 +177,10 @@ pub struct LayerMetrics {
     /// `None` for a layer with fewer than two regions: one piece of film has no
     /// neighbour, so there is no gap to report.
     pub min_gap_mm: Option<f64>,
+    /// Smallest area of any region in this layer, in square millimetres.
+    pub min_island_area_mm2: Option<f64>,
+    /// Regions per 100 square centimetres of the part footprint.
+    pub density_per_100cm2: f64,
 }
 
 /// The result of one validation run.
@@ -345,7 +355,42 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
         bbox: [min_x, min_y, w, h],
         min_width_mm,
         min_gap_mm: min_gap(&layer.geometry).map(|g| g.mm),
+        min_island_area_mm2: smallest_region_area(&layer.geometry),
+        density_per_100cm2: density_per_100cm2(&layer.geometry),
     }
+}
+
+/// The smallest region in a layer, by area.
+///
+/// Regions rather than islands: a loose piece of film and a piece that is joined
+/// to the rest fail in the same way, and they fail the same way whether or not
+/// anyone has noticed the second one is loose yet.
+fn smallest_region_area(shapes: &Shapes) -> Option<f64> {
+    shapes
+        .shapes
+        .iter()
+        .map(shape_area)
+        .map(f64::abs)
+        .filter(|a| *a > 0.0)
+        .fold(None, |acc: Option<f64>, a| {
+            Some(acc.map_or(a, |acc: f64| acc.min(a)))
+        })
+}
+
+/// Regions per 100 square centimetres (T-13).
+///
+/// Measured against the part's footprint, not the total ink area. The cost this
+/// rule is about is labour: how many separate pieces of film the operator has to
+/// weed and place, per unit of surface they are doing. Dividing by ink area would
+/// make a sparse, hard-to-cut drawing look dense.
+fn density_per_100cm2(shapes: &Shapes) -> f64 {
+    let (_, _, w, h) = bounding_box(shapes);
+    let footprint_mm2 = w * h;
+    if footprint_mm2 <= 0.0 {
+        return 0.0;
+    }
+    // 100 cm² = 10 000 mm².
+    shapes.shapes.len() as f64 * 10_000.0 / footprint_mm2
 }
 
 /// A tile bounding box as `[min_x, min_y, width, height]`.
@@ -676,6 +721,95 @@ fn check_layer(
         }
     }
 
+    // min_island_width and min_island_area (T-03) — a region with too little film
+    // in it will not stay put. Two distinct requirements with two distinct
+    // thresholds in the profile, and the docs only ever named the area, so the
+    // rule table covered only the width.
+    //
+    // Every region is checked, not only the ones flagged as islands: a piece that
+    // is joined to the rest of the film still has to hold itself up.
+    if let Some(rule) = rules.rule("min_island_area") {
+        let offenders: Vec<(usize, f64)> = layer
+            .geometry
+            .shapes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, shape_area(s).abs()))
+            .filter(|(_, a)| *a > 0.0 && !meets_threshold(*a, limits.island_area_mm2))
+            .collect();
+        if !offenders.is_empty() {
+            let smallest = offenders
+                .iter()
+                .map(|(_, a)| *a)
+                .fold(f64::INFINITY, f64::min);
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(smallest),
+                required: Some(limits.island_area_mm2),
+                unit: Unit::Mm2,
+                count: offenders.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} меньше {}. Меньше всех — {} мм².",
+                    layer.index,
+                    layer.name,
+                    counted(offenders.len(), "элемент", "элемента", "элементов"),
+                    format_area(smallest, limits.island_area_mm2),
+                    mask_kernel::report(smallest)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    Action {
+                        id: "merge_island".into(),
+                        label: "Объединить с соседним элементом".into(),
+                        primary: true,
+                        estimated_fidelity_loss: Some(0.01),
+                    },
+                    Action {
+                        id: "delete_island".into(),
+                        label: "Удалить".into(),
+                        primary: false,
+                        estimated_fidelity_loss: Some(0.02),
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
+    // T-13 — element density. A warning, not an error: it is about how long the
+    // job takes, not whether the result can be cut at all.
+    //
+    // Worded separately from the shared "measured / required" line, because this is
+    // an upper bound. Rendering it the other way round would read as though the
+    // layer were short of the limit when it is above it.
+    if let Some(rule) = rules.rule("layer_density") {
+        let density = metrics.density_per_100cm2;
+        if density > limits.max_features_per_100cm2 {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(density),
+                required: Some(limits.max_features_per_100cm2),
+                unit: Unit::Count,
+                count: metrics.islands,
+                headline: format!(
+                    "Слой {} «{}»: {:.0} элементов на 100 см², максимум {:.0}. Вырезать вручную будет долго.",
+                    layer.index, layer.name, density, limits.max_features_per_100cm2
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![Action { id: "show_elements".into(), label: "Показать элементы".into(), primary: true, estimated_fidelity_loss: None }],
+            });
+        }
+    }
+
     // island_anchored — a region nested inside another region's hole cannot be
     // applied as a separate piece and must be held by a bridge.
     //
@@ -795,6 +929,14 @@ pub fn render(report: &ValidationReport) -> String {
                     v.unit.suffix(),
                 ),
                 Unit::Deg => (format!("{m:.1}"), format!("{r:.1}"), v.unit.suffix()),
+                Unit::Mm2 => (
+                    format!("{:.3}", mask_kernel::report(m)),
+                    format!("{:.3}", mask_kernel::report(r)),
+                    v.unit.suffix(),
+                ),
+                // A count has no unit, and printing a bare number against another
+                // bare number reads as a measurement with no limit attached.
+                Unit::Count => (format!("{m:.0}"), format!("{r:.0}"), "на 100 см²"),
             };
             out.push(format!("   измерено {m} {suffix}, требуется {r} {suffix}"));
         }
@@ -1373,6 +1515,146 @@ mod tests {
         )]);
         assert!(
             !report.violations.iter().any(|v| v.code == "open_cut_path"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    /// A layer of separate square regions of a given side length.
+    fn islands_layer(index: u32, side: f64, count: usize, pitch: f64) -> LayerInput {
+        let shapes: Vec<Shape> = (0..count)
+            .map(|i| {
+                let x = i as f64 * pitch;
+                Shape::new(Contour {
+                    points: vec![
+                        Point { x, y: 0.0 },
+                        Point {
+                            x: x + side,
+                            y: 0.0,
+                        },
+                        Point {
+                            x: x + side,
+                            y: side,
+                        },
+                        Point { x, y: side },
+                    ],
+                    closed: true,
+                })
+            })
+            .collect();
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes { shapes },
+        }
+    }
+
+    #[test]
+    fn a_tiny_region_fails_the_area_rule() {
+        // The material's minimum island area is 2.40 mm². A 1x1 mm piece is 1 mm².
+        let report = run(vec![islands_layer(1, 1.0, 1, 10.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_island_area")
+            .expect("a 1 mm² piece must violate a 2.40 mm² minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert_eq!(v.unit, Unit::Mm2);
+        assert!((v.measured.expect("measured") - 1.0).abs() < 0.05);
+        assert_eq!(v.required, Some(2.40));
+    }
+
+    #[test]
+    fn a_region_at_the_area_threshold_passes() {
+        // 2.5 mm on a side is 6.25 mm², comfortably over 2.40.
+        let report = run(vec![islands_layer(1, 2.5, 1, 10.0)]);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "min_island_area"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn the_area_rule_names_how_many_and_the_smallest() {
+        let report = run(vec![islands_layer(1, 1.0, 4, 10.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_island_area")
+            .expect("violation");
+        assert_eq!(v.count, 4, "all four pieces are too small");
+        assert!(v.headline.contains("4 элемента"), "{}", v.headline);
+    }
+
+    #[test]
+    fn a_normal_band_raises_no_island_area_warning() {
+        let report = run(vec![band_layer(1, 0.80, 200.0)]);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "min_island_area"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn a_layer_of_many_pieces_is_flagged_as_dense() {
+        // 120 pieces on a 25 x 2 mm strip: 480 per 100 cm², against a limit of 180.
+        let report = run(vec![islands_layer(1, 2.0, 120, 2.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "layer_density")
+            .expect("120 pieces on a narrow strip must be flagged");
+        assert_eq!(
+            v.severity,
+            Severity::Warning,
+            "T-13 is about labour, not cuttability"
+        );
+        assert!(v.measured.expect("measured") > 180.0, "{:?}", v.measured);
+    }
+
+    #[test]
+    fn density_is_measured_against_the_footprint_not_the_ink() {
+        // A few large pieces over a large part is not dense, however much ink there is.
+        let report = run(vec![islands_layer(1, 60.0, 2, 80.0)]);
+        assert!(
+            report.layers[0].density_per_100cm2 < 10.0,
+            "two big pieces on a big part is sparse, got {}",
+            report.layers[0].density_per_100cm2
+        );
+        assert!(
+            !report.violations.iter().any(|v| v.code == "layer_density"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn the_density_rule_reads_as_an_upper_bound() {
+        // The shared renderer says "measured X, required Y". For an upper bound that
+        // phrasing points the wrong way, so this rule is worded separately and the
+        // headline has to say which way it failed.
+        let report = run(vec![islands_layer(1, 2.0, 120, 2.0)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "layer_density")
+            .expect("violation");
+        assert!(v.headline.contains("максимум"), "{}", v.headline);
+    }
+
+    #[test]
+    fn a_sparse_layer_raises_no_density_warning() {
+        let report = run(vec![islands_layer(1, 10.0, 3, 40.0)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "layer_density"),
             "{:?}",
             report.violations
         );
