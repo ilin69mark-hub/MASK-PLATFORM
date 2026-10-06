@@ -38,4 +38,6 @@ pub use measure::{
     meets_threshold, point_in_contour, shape_area, shape_bounds, shapes_area, signed_contour_area,
     unanchored_islands,
 };
-pub use offset::{lib_math_mode, min_width, offset_shape, survives_inward_offset, widen};
+pub use offset::{
+    lib_math_mode, min_width, narrowest_neck, offset_shape, survives_inward_offset, widen,
+};

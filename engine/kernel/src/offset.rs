@@ -207,6 +207,97 @@ pub fn min_width(shape: &Shapes) -> Option<f64> {
     Some(lo * 2.0)
 }
 
+/// The width at which a shape stops being one connected piece, in millimetres.
+///
+/// This is the measure T-01 actually wants, and it is stronger than
+/// [`min_width`]: a shape comes apart in two ways, and both matter.
+///
+/// It can **split** — a bridge tab or any neck lets one piece become two, and
+/// the two then weed apart. It can **vanish** — a band erodes to nothing, and
+/// that is exactly its width.
+///
+/// `min_width` only sees the second, which is why it missed a 0.2 mm bridge
+/// tab entirely: the surrounding frame kept the result non-empty long after
+/// the tab had closed. Counting components sees both, because both change the
+/// count away from what it was.
+///
+/// A distance transform does not answer this either. It gives the *widest*
+/// inscribed circle, which equals the band width for a band and says nothing
+/// about a neck; the narrowest neck is `2 × min` over the medial axis, and
+/// computing a medial axis is not a local change to this file. Bisection on the
+/// offset topology answers it exactly, with the library doing the geometry.
+///
+/// The signal is monotonic in the useful direction: once a delta has changed
+/// the component count, every larger delta has too, so the smallest such delta
+/// is well defined.
+///
+/// Holes are never components. A ring eroded to half its bar width is still one
+/// ring, and counting the hole as a second piece would report every window in a
+/// stencil as a neck.
+///
+/// What it still misses: a thin *appendage* on a wide band. Eroding the band
+/// more than half its width deletes the whisker without changing the count, so
+/// this returns the band's width. That limitation is documented on `min_width`
+/// and pinned by a test there.
+#[must_use]
+pub fn narrowest_neck(shape: &Shapes) -> Option<f64> {
+    if shape.is_empty() {
+        return None;
+    }
+
+    let base = component_count(shape);
+    let (_, _, w, h) = bounding_box(shape);
+    let ceiling = w.max(h) / 2.0;
+
+    let mut lo = 0.0_f64; // known to stay one piece
+    let mut hi = ceiling;
+    let mut guard = 0;
+
+    // Grow until it does come apart, so the search range is real rather than
+    // assumed. A shape with no neck will keep holding together, and this
+    // terminates on the guard instead of running forever.
+    // "Came apart" means the count is no longer what it was — either it split
+    // into more pieces, or it eroded away entirely. Testing only for "more"
+    // misses the vanishing case, which is the ordinary band and is why the
+    // first version of this function returned None for every band it was given.
+    let came_apart = |d: f64| -> bool {
+        offset_shape(shape, -d)
+            .map(|s| component_count(&s) != base)
+            .unwrap_or(true)
+    };
+
+    loop {
+        if came_apart(hi) || guard >= 48 {
+            break;
+        }
+        hi *= 2.0;
+        guard += 1;
+    }
+
+    if !came_apart(hi) {
+        return None;
+    }
+
+    for _ in 0..WIDTH_SEARCH_STEPS {
+        let mid = (lo + hi) / 2.0;
+        if came_apart(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    Some(hi * 2.0)
+}
+
+/// Connected components of a shape set.
+///
+/// Holes are not components: a ring eroded to half its bar width is still one
+/// ring, and counting the hole as a second piece would report every window in a
+/// stencil as a neck.
+fn component_count(shapes: &Shapes) -> usize {
+    shapes.shapes.len()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +325,97 @@ mod tests {
                 "a {w} mm band measured {measured:.4}"
             );
         }
+    }
+
+    #[test]
+    fn narrowest_neck_agrees_with_min_width_on_a_plain_band() {
+        // They answer different questions in general, so agreement here is a check
+        // that the second one is not simply returning something else.
+        for w in [0.8, 1.2, 4.0] {
+            let band = rect(0.0, 0.0, 40.0, w);
+            let neck = narrowest_neck(&band).expect("a band comes apart");
+            let width = min_width(&band).expect("a width");
+            assert!(
+                (neck - width).abs() < 1e-3,
+                "band of {w}: neck {neck:.4} vs width {width:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowest_neck_finds_the_bridge_tab_that_min_width_missed() {
+        // The whole reason this function exists. A frame, an island inside its
+        // hole, and a tab joining them: the tab is the narrowest feature and the
+        // only place the piece could come apart.
+        for tab in [1.2, 0.6, 0.2] {
+            let frame = Shape::with_holes(
+                Contour {
+                    points: vec![p(0.0, 0.0), p(20.0, 0.0), p(20.0, 20.0), p(0.0, 20.0)],
+                    closed: true,
+                },
+                vec![Contour {
+                    points: vec![p(5.0, 5.0), p(5.0, 15.0), p(15.0, 15.0), p(15.0, 5.0)],
+                    closed: true,
+                }],
+            );
+            let island = Shape::new(Contour {
+                points: vec![p(8.0, 8.0), p(12.0, 8.0), p(12.0, 12.0), p(8.0, 12.0)],
+                closed: true,
+            });
+            let before = Shapes {
+                shapes: vec![frame, island],
+            };
+            let (joined, _) = crate::bridge::bridge_unanchored(
+                &before,
+                crate::bridge::BridgeLimits {
+                    width_mm: tab,
+                    max_length_mm: 25.0,
+                },
+            )
+            .expect("bridge");
+
+            assert_eq!(joined.shapes.len(), 1, "the tab must make it one piece");
+            let neck = narrowest_neck(&joined).expect("it comes apart somewhere");
+            assert!(
+                (neck - tab).abs() < 1e-2,
+                "a {tab} mm tab measured {neck:.4}"
+            );
+
+            // And this is the bug: min_width sees the frame, not the tab.
+            let width = min_width(&joined).expect("a width");
+            assert!(
+                width > tab * 2.0,
+                "min_width should still be blind to the tab, got {width:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thick_unbridged_shape_has_no_neck() {
+        // Two disjoint pieces of film are applied one after another, so there is no
+        // neck between them and none should be reported.
+        let two = Shapes {
+            shapes: [
+                rect(0.0, 0.0, 5.0, 5.0).shapes,
+                rect(40.0, 0.0, 5.0, 5.0).shapes,
+            ]
+            .concat(),
+        };
+        // Each piece is 5 mm wide, so each vanishes at 5 mm. There is no neck
+        // *between* them: disjoint film is applied one piece at a time.
+        let neck = narrowest_neck(&two).expect("each piece comes apart on its own");
+        assert!((neck - 5.0).abs() < 1e-3, "expected 5 mm, got {neck:.4}");
+    }
+
+    #[test]
+    fn an_empty_layer_has_no_neck() {
+        assert_eq!(narrowest_neck(&Shapes::new()), None);
+    }
+
+    #[test]
+    fn narrowest_neck_is_deterministic() {
+        let band = rect(0.0, 0.0, 40.0, 2.0);
+        assert_eq!(narrowest_neck(&band), narrowest_neck(&band));
     }
 
     #[test]

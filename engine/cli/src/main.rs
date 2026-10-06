@@ -727,7 +727,7 @@ fn run(args: &Args) -> Result<bool, String> {
             .min_gap_mm
             .map_or("—".to_string(), |v| format!("{v:.3} mm"));
         println!(
-            "  L{:02} {:<18} regions {:<3} area {:>12.1} mm²  bbox {:>7.1}×{:<7.1} mm  min width {width}  min gap {gap}",
+            "  L{:02} {:<18} regions {:<3} area {:>12.1} mm²  bbox {:>7.1}×{:<7.1} mm  narrowest {width}  min gap {gap}",
             m.index, m.name, m.paths, m.area_mm2, m.bbox[2], m.bbox[3]
         );
     }

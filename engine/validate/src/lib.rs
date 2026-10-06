@@ -12,8 +12,8 @@
 
 use mask_kernel::{
     bounding_box, format_area, format_degrees, format_measurement, meets_threshold, min_gap,
-    min_width, open_cut_contours, self_intersections, shape_area, shapes_area, sharp_corners,
-    unanchored_islands, Contour, Point, Shape, Shapes,
+    min_width, narrowest_neck, open_cut_contours, self_intersections, shape_area, shapes_area,
+    sharp_corners, unanchored_islands, Contour, Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -170,7 +170,12 @@ pub struct LayerMetrics {
     pub holes: usize,
     pub area_mm2: f64,
     pub bbox: [f64; 4],
-    /// Narrowest measured element, when one could be measured.
+    /// Narrowest measured element, in millimetres.
+    ///
+    /// The smaller of the band width and the narrowest neck, because they see
+    /// different defects: one sees how thin a band is, the other sees where a
+    /// piece comes apart. Reporting only the first let a 0.2 mm bridge tab
+    /// through.
     pub min_width_mm: Option<f64>,
     /// Tightest gap between separate regions of this layer.
     ///
@@ -338,12 +343,30 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
     // Each shape is a separate region of film, so the layer's narrowest element
     // is the minimum across regions. min_width works on a Shapes set, so each
     // region is wrapped rather than reimplementing the measurement.
+    // The minimum over two different measures, because they see different defects.
+    //
+    // `min_width` is how wide a region is as a band. `narrowest_neck` is where the
+    // region stops being one piece. For a band they agree; for a bridged island
+    // they do not, and `narrowest_neck` is the one that would have caught a 0.2 mm
+    // bridge tab passing this check.
     let min_width_mm = layer
         .geometry
         .shapes
         .iter()
         .filter_map(|shape| min_width(&Shapes::single(shape.clone())))
         .reduce(f64::min);
+    let narrowest = layer
+        .geometry
+        .shapes
+        .iter()
+        .filter_map(|shape| narrowest_neck(&Shapes::single(shape.clone())))
+        .reduce(f64::min);
+    let narrowest_mm = match (min_width_mm, narrowest) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
 
     LayerMetrics {
         index: layer.index,
@@ -353,7 +376,7 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
         holes: layer.geometry.shapes.iter().map(|s| s.holes.len()).sum(),
         area_mm2: shapes_area(&layer.geometry),
         bbox: [min_x, min_y, w, h],
-        min_width_mm,
+        min_width_mm: narrowest_mm,
         min_gap_mm: min_gap(&layer.geometry).map(|g| g.mm),
         min_island_area_mm2: smallest_region_area(&layer.geometry),
         density_per_100cm2: density_per_100cm2(&layer.geometry),
@@ -1657,6 +1680,96 @@ mod tests {
             !report.violations.iter().any(|v| v.code == "layer_density"),
             "{:?}",
             report.violations
+        );
+    }
+
+    /// A frame, an island inside its hole, and a tab of a given width joining them.
+    fn bridged_island_layer(index: u32, tab_mm: f64) -> LayerInput {
+        let frame = Shape::with_holes(
+            Contour {
+                points: vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 20.0, y: 0.0 },
+                    Point { x: 20.0, y: 20.0 },
+                    Point { x: 0.0, y: 20.0 },
+                ],
+                closed: true,
+            },
+            vec![Contour {
+                points: vec![
+                    Point { x: 5.0, y: 5.0 },
+                    Point { x: 5.0, y: 15.0 },
+                    Point { x: 15.0, y: 15.0 },
+                    Point { x: 15.0, y: 5.0 },
+                ],
+                closed: true,
+            }],
+        );
+        let island = Shape::new(Contour {
+            points: vec![
+                Point { x: 8.0, y: 8.0 },
+                Point { x: 12.0, y: 8.0 },
+                Point { x: 12.0, y: 12.0 },
+                Point { x: 8.0, y: 12.0 },
+            ],
+            closed: true,
+        });
+        let before = Shapes {
+            shapes: vec![frame, island],
+        };
+        let (joined, _) = mask_kernel::bridge::bridge_unanchored(
+            &before,
+            mask_kernel::bridge::BridgeLimits {
+                width_mm: tab_mm,
+                max_length_mm: 25.0,
+            },
+        )
+        .expect("bridge");
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: joined,
+        }
+    }
+
+    #[test]
+    fn a_too_thin_bridge_tab_fails_the_width_rule() {
+        // The regression this whole change exists for. The tab is 0.2 mm against a
+        // 0.80 mm minimum, and the frame around it is 5 mm thick, so the old
+        // measurement reported 5 mm and passed it.
+        let report = run(vec![bridged_island_layer(1, 0.2)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_line_width")
+            .expect("a 0.2 mm tab must fail a 0.80 mm minimum");
+        assert_eq!(v.severity, Severity::Error);
+        assert!(
+            (v.measured.expect("measured") - 0.2).abs() < 0.05,
+            "should measure the tab, got {:?}",
+            v.measured
+        );
+        assert!(matches!(report.verdict, Verdict::Fail));
+    }
+
+    #[test]
+    fn a_bridge_tab_at_the_threshold_passes() {
+        let report = run(vec![bridged_island_layer(1, 1.2)]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "min_line_width"),
+            "a 1.2 mm tab must satisfy a 0.80 mm minimum: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn the_reported_metric_is_the_narrower_of_band_and_neck() {
+        let report = run(vec![bridged_island_layer(1, 1.2)]);
+        let reported = report.layers[0].min_width_mm.expect("a measurement");
+        // The frame is 5 mm thick; the tab is 1.2. The smaller is the answer.
+        assert!(
+            reported < 2.0,
+            "should report the tab, not the frame, got {reported:.4}"
         );
     }
 
