@@ -4,18 +4,32 @@ use mask_kernel::geom::{Contour, Point, Shape, Shapes};
 fn main() {
     let sq = Shapes::single(Shape::new(Contour {
         points: vec![
-            Point { x: 0.0, y: 0.0 }, Point { x: 10.0, y: 0.0 },
-            Point { x: 10.0, y: 10.0 }, Point { x: 0.0, y: 10.0 },
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 10.0, y: 10.0 },
+            Point { x: 0.0, y: 10.0 },
         ],
-        closed: true, arcs: Vec::new(),
+        closed: true,
+        arcs: Vec::new(),
     }));
     let (rounded, report) = mask_kernel::round_corners(&sq, 1.0, 100.0, 0.05);
     let c = &rounded.shapes[0].outer;
     println!("{report:?}");
     println!("точек: {}, дуг: {}", c.points.len(), c.arcs.len());
-    for a in &c.arcs { println!("  дуга {}..{} центр=({:.4},{:.4}) r={:.4}", a.from, a.to, a.centre.x, a.centre.y, a.radius); }
-    println!("площадь (точная, по дугам): {:.6}", mask_kernel::measure::shapes_area(&rounded));
-    println!("площадь 100-(4-pi):          {:.6}", 100.0 - (4.0 - std::f64::consts::PI));
+    for a in &c.arcs {
+        println!(
+            "  дуга {}..{} центр=({:.4},{:.4}) r={:.4}",
+            a.from, a.to, a.centre.x, a.centre.y, a.radius
+        );
+    }
+    println!(
+        "площадь (точная, по дугам): {:.6}",
+        mask_kernel::measure::shapes_area(&rounded)
+    );
+    println!(
+        "площадь 100-(4-pi):          {:.6}",
+        100.0 - (4.0 - std::f64::consts::PI)
+    );
 
     std::fs::write("/tmp/vis/corners.svg", format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -1 12 12" width="760" height="760">
 <rect x="-1" y="-1" width="12" height="12" fill="white"/>

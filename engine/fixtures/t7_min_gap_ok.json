@@ -11,6 +11,14 @@
     ]
   },
   "_comment": "TEST G2. Two bars 1.10 mm apart, above the 0.90 mm minimum gap. Expected: PASS on min_gap.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "layer_density",
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

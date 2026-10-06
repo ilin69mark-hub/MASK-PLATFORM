@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "TEST X1. Two overlapping layers both declaring application_order 1. Expected: crossing error — the paint sequence is undefined. Removing the two application_order lines makes it pass, because the index fallback already orders them.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "crossing"
+    ]
+  },
   "layers": [
     {
       "index": 1,

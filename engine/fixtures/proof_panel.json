@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "First physical proof target. Sized 260 x 180 mm to fit the 284 mm working field of the knife-25mm profile, so it needs no nesting and can be cut from a single sheet. Every layer meets the 0.80 mm minimum of matte-vinyl-090. The lines interlock and cross, which is the graphic class the whole engine exists for.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

@@ -305,6 +305,52 @@ struct Fixture {
     #[serde(default)]
     target: FixtureTarget,
     layers: Vec<FixtureLayer>,
+    /// What this fixture claims to prove, in a form the test suite can read.
+    ///
+    /// Required rather than optional: a fixture with no stated expectation is a
+    /// fixture nobody can tell apart from one that quietly stopped testing
+    /// anything. `_comment` explains the idea in prose, which nothing enforces.
+    #[serde(rename = "_expect")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    expect: Expect,
+}
+
+/// Whether validation runs at all.
+#[derive(serde::Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum ExpectOutcome {
+    /// The fixture is validated and gets a verdict.
+    Verdict,
+    /// The source-integrity gate refuses it before anything is merged. A real
+    /// outcome, and the only one that never reaches the Validator.
+    Rejected,
+}
+
+/// What a fixture promises the engine will do with it.
+///
+/// The verdict is a typed field, not a string: a misspelled expectation fails to
+/// parse instead of quietly never matching.
+///
+/// A fixture whose `_comment` says "PASS" and whose verdict here says
+/// `PASS_WITH_WARNINGS` is not a contradiction. The prose means "no errors";
+/// `PASS_WITH_WARNINGS` also carries warnings, most often `min_feature_length` on
+/// the short edges a stroke leaves at a line end. Which warnings a fixture expects
+/// is stated here rather than left to be inferred from the prose.
+#[derive(serde::Deserialize)]
+// Read by the test that holds the fixtures to their claims; the binary itself
+// never consults it.
+#[cfg_attr(not(test), allow(dead_code))]
+struct Expect {
+    outcome: ExpectOutcome,
+    #[serde(default)]
+    verdict: Option<mask_validate::Verdict>,
+    /// Exactly the rule codes that must come back as errors. Compared as a set,
+    /// so a new error appearing is a failure — that is the point.
+    #[serde(default)]
+    errors: Vec<String>,
+    /// Same for warnings.
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -563,197 +609,27 @@ fn run(args: &Args) -> Result<bool, String> {
     }
     println!();
 
-    // Integrity is checked on the geometry as written, before anything is merged.
-    //
-    // This is not defensive tidiness. `build_layer` unions every region of a layer
-    // into one piece, and the union resolves self-intersections: a bow tie goes in
-    // as one contour reporting 0 mm² — its two lobes cancel exactly — and comes out
-    // as two 400 mm² triangles. Nothing is reported. The operator's figure was
-    // ambiguous, the engine picked an interpretation, and the only evidence is a
-    // geometry that no longer looks like what they drew.
-    if let Err(problems) = check_source_integrity(&fixture) {
-        for problem in &problems {
-            eprintln!("{problem}");
-        }
-        eprintln!(
-            "\nПроблем в исходной геометрии: {}. Экспорт не выполнялся.",
-            problems.len()
-        );
-        eprintln!("Объединение разрешает самопересечения и молча меняет рисунок.");
-        eprintln!("Исправьте исходник или пересоберите его осознанно и проверьте результат.");
-        return Ok(false);
-    }
-
-    // Bridging runs before widening, because a tab added to a centreline that is
-    // about to be stroked would then be stroked too, and the tab would come out
-    // wider than the material's minimum by accident rather than by choice.
-    let limits = mask_kernel::bridge::BridgeLimits {
-        width_mm: profile.limits.bridge_width_mm,
-        max_length_mm: material.minimums.bridge_length_mm,
-    };
-
-    let mut bridges_added = 0usize;
-    let layers: Vec<LayerInput> = fixture
-        .layers
-        .iter()
-        .map(|l| build_layer(l, args.widen_to, args.bridge.then_some(limits)))
-        .map(|layer| {
-            let mut layer = layer?;
-            if args.round {
-                // Runs after bridging: a tab is a rectangle with four right
-                // angles, so bridging first means filleting can see them.
-                let (fixed, report) = mask_kernel::corner::round_corners(
-                    &layer.geometry,
-                    profile.limits.corner_radius_mm,
-                    profile.limits.min_angle_deg,
-                    plotter.blade.curve_tolerance_mm,
-                );
-                match report {
-                    mask_kernel::RoundReport::Complete { rounded } if rounded > 0 => {
-                        println!(
-                            "Auto-Fix L{:02}: filleted {rounded} corner(s), radius {} mm",
-                            layer.index,
-                            mask_kernel::report(profile.limits.corner_radius_mm)
-                        );
-                        layer.geometry = fixed;
-                    }
-                    // Naming what could not be done matters: a corner left sharp is
-                    // a tear, and the validator would otherwise report it with no
-                    // indication that an automatic fix had already been attempted.
-                    mask_kernel::RoundReport::Incomplete { rounded, skipped } => {
-                        println!(
-                            "Auto-Fix L{:02}: filleted {rounded}, left {} corner(s) sharp (edges too short)",
-                            layer.index,
-                            skipped.len()
-                        );
-                        layer.geometry = fixed;
-                    }
-                    mask_kernel::RoundReport::Complete { .. } => {}
-                }
+    let Prepared {
+        layers,
+        plans,
+        report,
+    } = match prepare(
+        &fixture, &material, &plotter, &profile, &rules, verified, args,
+    )? {
+        Ok(prepared) => prepared,
+        Err(problems) => {
+            for problem in &problems {
+                eprintln!("{problem}");
             }
-
-            if args.bridge {
-                match mask_kernel::bridge::bridge_unanchored(&layer.geometry, limits) {
-                    Ok((fixed, bridges)) => {
-                        bridges_added += bridges.len();
-                        for b in &bridges {
-                            println!(
-                                "Auto-Fix L{:02}: bridged island {} with a {:.2} mm tab, {:.2} mm long",
-                                layer.index, b.island_index, b.width_mm, b.length_mm
-                            );
-                        }
-                        layer.geometry = fixed;
-                        // Record the tabs, so T-06 and T-07 have something to
-                        // check. Without this the tabs are geometry and nothing can
-                        // ask about them afterwards.
-                        layer.bridges = bridges
-                            .iter()
-                            .map(|b| mask_validate::BridgeRecord {
-                                width_mm: b.width_mm,
-                                length_mm: b.length_mm,
-                                at: b.to,
-                            })
-                            .collect();
-                    }
-                    // Refusing is the honest outcome. A tab that is too long or
-                    // cannot reach the film would be a claim about the material
-                    // that nobody measured, so the layer is left as it was and
-                    // the Validator reports the island.
-                    Err(e) => {
-                        println!("Auto-Fix L{:02}: could not bridge ({e})", layer.index);
-                    }
-                }
-            }
-            Ok(layer)
-        })
-        .collect::<Result<_, String>>()?;
-
-    if let Some(w) = args.widen_to {
-        println!("Auto-Fix: widened every layer to {w} mm");
-        println!();
-    }
-    if args.bridge {
-        println!(
-            "Auto-Fix: {bridges_added} tab(s) added, {:.2} mm wide, {:.0} mm maximum",
-            limits.width_mm, limits.max_length_mm
-        );
-        println!();
-    }
-
-    let nest_request = NestRequest {
-        field_width_mm: profile.limits.max_tile_width_mm,
-        field_length_mm: profile.limits.max_tile_length_mm,
-        separation_gap_mm: profile.limits.gap_mm,
-        kerf_mm: profile.limits.kerf_mm,
-    };
-
-    // Nesting happens before validation so the field rule is measured against
-    // what would actually be printed, not against the uncut mask.
-    let mut plans = Vec::new();
-    if args.nest {
-        for layer in &layers {
-            if needs_nesting(&layer.geometry, nest_request) {
-                match fixed_grid(&layer.geometry, nest_request) {
-                    Ok(plan) => {
-                        // Waste ratio is reported but not emphasised: for
-                        // line art almost the whole sheet is weeded away, so a
-                        // figure near 100% is expected, not a defect. The
-                        // number that costs money is sheets per layer.
-                        println!(
-                            "Nested L{:02}: {} tiles, {} sheets, waste {:.1}% (normal for line art), separation {} mm",
-                            layer.index,
-                            plan.summary.tile_count,
-                            plan.summary.tile_count,
-                            plan.summary.waste_ratio * 100.0,
-                            plan.summary.separation_gap_mm
-                        );
-                        plans.push((layer.index, layer.name.clone(), plan));
-                    }
-                    Err(e) => println!("Nested L{:02}: refused ({e})", layer.index),
-                }
-            }
-        }
-        if plans.is_empty() {
-            println!("No layer exceeded the working field; nothing to nest.");
-        }
-        println!();
-    }
-
-    // Tile rectangles go to the validator so the field rule is measured against
-    // what would actually be printed.
-    let mut tile_rects: std::collections::BTreeMap<u32, Vec<Rect4>> =
-        std::collections::BTreeMap::new();
-    for (index, _, plan) in &plans {
-        tile_rects.insert(
-            *index,
-            plan.tiles
-                .iter()
-                .map(|t| {
-                    let (_, _, w, h) = mask_kernel::bounding_box(&t.content);
-                    [0.0, 0.0, w, h]
-                })
-                .collect(),
-        );
-    }
-
-    // Registration anchors, one per nested layer: where its first tile sits on
-    // the sheet. Layers nested from the same origin share one, and T-15 reports
-    // the difference between any two that do not.
-    let mut anchors: std::collections::BTreeMap<u32, Point> = std::collections::BTreeMap::new();
-    for (index, _, plan) in &plans {
-        if let Some(first) = plan.tiles.first() {
-            anchors.insert(
-                *index,
-                Point {
-                    x: first.marks.part_anchor.left.x_mm,
-                    y: first.marks.part_anchor.left.y_mm,
-                },
+            eprintln!(
+                "\nПроблем в исходной геометрии: {}. Экспорт не выполнялся.",
+                problems.len()
             );
+            eprintln!("Объединение разрешает самопересечения и молча меняет рисунок.");
+            eprintln!("Исправьте исходник или пересоберите его осознанно и проверьте результат.");
+            return Ok(false);
         }
-    }
-
-    let report =
-        validate_with_registration(&layers, &profile, &rules, verified, &tile_rects, &anchors);
+    };
 
     println!("Measured:");
     for m in &report.layers {
@@ -990,4 +866,375 @@ fn run(args: &Args) -> Result<bool, String> {
         "Next: print at 100%, then cut by hand. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
     );
     Ok(report.verdict.is_manufacturable())
+}
+/// The state the pipeline reaches between a fixture and a verdict.
+///
+/// Split out of `run` so the fixtures can be checked against what they claim
+/// without going through the command line and parsing its prose. The narration
+/// stays in here: it is written for the operator, and a test harness swallows it.
+struct Prepared {
+    layers: Vec<LayerInput>,
+    plans: Vec<(u32, String, mask_nesting::NestingPlan)>,
+    report: mask_validate::ValidationReport,
+}
+
+/// Everything from source geometry to a verdict: integrity, automatic fixes,
+/// nesting, validation.
+///
+/// `Ok(Err(..))` is the source-integrity gate refusing the geometry before
+/// anything was merged — a real outcome, not a failure, and the one outcome a
+/// fixture can expect that never reaches a verdict.
+#[allow(clippy::too_many_arguments)]
+fn prepare(
+    fixture: &Fixture,
+    material: &MaterialProfile,
+    plotter: &PlotterProfile,
+    profile: &CuttingProfile,
+    rules: &RuleSet,
+    verified: bool,
+    args: &Args,
+) -> Result<Result<Prepared, Vec<String>>, String> {
+    // Integrity is checked on the geometry as written, before anything is merged.
+    //
+    // This is not defensive tidiness. `build_layer` unions every region of a layer
+    // into one piece, and the union resolves self-intersections: a bow tie goes in
+    // as one contour reporting 0 mm² — its two lobes cancel exactly — and comes out
+    // as two 400 mm² triangles. Nothing is reported. The operator's figure was
+    // ambiguous, the engine picked an interpretation, and the only evidence is a
+    // geometry that no longer looks like what they drew.
+    if let Err(problems) = check_source_integrity(fixture) {
+        return Ok(Err(problems));
+    }
+
+    // Bridging runs before widening, because a tab added to a centreline that is
+    // about to be stroked would then be stroked too, and the tab would come out
+    // wider than the material's minimum by accident rather than by choice.
+    let limits = mask_kernel::bridge::BridgeLimits {
+        width_mm: profile.limits.bridge_width_mm,
+        max_length_mm: material.minimums.bridge_length_mm,
+    };
+
+    let mut bridges_added = 0usize;
+    let layers: Vec<LayerInput> = fixture
+        .layers
+        .iter()
+        .map(|l| build_layer(l, args.widen_to, args.bridge.then_some(limits)))
+        .map(|layer| {
+            let mut layer = layer?;
+            if args.round {
+                // Runs after bridging: a tab is a rectangle with four right
+                // angles, so bridging first means filleting can see them.
+                let (fixed, report) = mask_kernel::corner::round_corners(
+                    &layer.geometry,
+                    profile.limits.corner_radius_mm,
+                    profile.limits.min_angle_deg,
+                    plotter.blade.curve_tolerance_mm,
+                );
+                match report {
+                    mask_kernel::RoundReport::Complete { rounded } if rounded > 0 => {
+                        println!(
+                            "Auto-Fix L{:02}: filleted {rounded} corner(s), radius {} mm",
+                            layer.index,
+                            mask_kernel::report(profile.limits.corner_radius_mm)
+                        );
+                        layer.geometry = fixed;
+                    }
+                    // Naming what could not be done matters: a corner left sharp is
+                    // a tear, and the validator would otherwise report it with no
+                    // indication that an automatic fix had already been attempted.
+                    mask_kernel::RoundReport::Incomplete { rounded, skipped } => {
+                        println!(
+                            "Auto-Fix L{:02}: filleted {rounded}, left {} corner(s) sharp (edges too short)",
+                            layer.index,
+                            skipped.len()
+                        );
+                        layer.geometry = fixed;
+                    }
+                    mask_kernel::RoundReport::Complete { .. } => {}
+                }
+            }
+
+            if args.bridge {
+                match mask_kernel::bridge::bridge_unanchored(&layer.geometry, limits) {
+                    Ok((fixed, bridges)) => {
+                        bridges_added += bridges.len();
+                        for b in &bridges {
+                            println!(
+                                "Auto-Fix L{:02}: bridged island {} with a {:.2} mm tab, {:.2} mm long",
+                                layer.index, b.island_index, b.width_mm, b.length_mm
+                            );
+                        }
+                        layer.geometry = fixed;
+                        // Record the tabs, so T-06 and T-07 have something to
+                        // check. Without this the tabs are geometry and nothing can
+                        // ask about them afterwards.
+                        layer.bridges = bridges
+                            .iter()
+                            .map(|b| mask_validate::BridgeRecord {
+                                width_mm: b.width_mm,
+                                length_mm: b.length_mm,
+                                at: b.to,
+                            })
+                            .collect();
+                    }
+                    // Refusing is the honest outcome. A tab that is too long or
+                    // cannot reach the film would be a claim about the material
+                    // that nobody measured, so the layer is left as it was and
+                    // the Validator reports the island.
+                    Err(e) => {
+                        println!("Auto-Fix L{:02}: could not bridge ({e})", layer.index);
+                    }
+                }
+            }
+            Ok(layer)
+        })
+        .collect::<Result<_, String>>()?;
+
+    if let Some(w) = args.widen_to {
+        println!("Auto-Fix: widened every layer to {w} mm");
+        println!();
+    }
+    if args.bridge {
+        println!(
+            "Auto-Fix: {bridges_added} tab(s) added, {:.2} mm wide, {:.0} mm maximum",
+            limits.width_mm, limits.max_length_mm
+        );
+        println!();
+    }
+
+    let nest_request = NestRequest {
+        field_width_mm: profile.limits.max_tile_width_mm,
+        field_length_mm: profile.limits.max_tile_length_mm,
+        separation_gap_mm: profile.limits.gap_mm,
+        kerf_mm: profile.limits.kerf_mm,
+    };
+
+    // Nesting happens before validation so the field rule is measured against
+    // what would actually be printed, not against the uncut mask.
+    let mut plans = Vec::new();
+    if args.nest {
+        for layer in &layers {
+            if needs_nesting(&layer.geometry, nest_request) {
+                match fixed_grid(&layer.geometry, nest_request) {
+                    Ok(plan) => {
+                        // Waste ratio is reported but not emphasised: for
+                        // line art almost the whole sheet is weeded away, so a
+                        // figure near 100% is expected, not a defect. The
+                        // number that costs money is sheets per layer.
+                        println!(
+                            "Nested L{:02}: {} tiles, {} sheets, waste {:.1}% (normal for line art), separation {} mm",
+                            layer.index,
+                            plan.summary.tile_count,
+                            plan.summary.tile_count,
+                            plan.summary.waste_ratio * 100.0,
+                            plan.summary.separation_gap_mm
+                        );
+                        plans.push((layer.index, layer.name.clone(), plan));
+                    }
+                    Err(e) => println!("Nested L{:02}: refused ({e})", layer.index),
+                }
+            }
+        }
+        if plans.is_empty() {
+            println!("No layer exceeded the working field; nothing to nest.");
+        }
+        println!();
+    }
+
+    // Tile rectangles go to the validator so the field rule is measured against
+    // what would actually be printed.
+    let mut tile_rects: std::collections::BTreeMap<u32, Vec<Rect4>> =
+        std::collections::BTreeMap::new();
+    for (index, _, plan) in &plans {
+        tile_rects.insert(
+            *index,
+            plan.tiles
+                .iter()
+                .map(|t| {
+                    let (_, _, w, h) = mask_kernel::bounding_box(&t.content);
+                    [0.0, 0.0, w, h]
+                })
+                .collect(),
+        );
+    }
+
+    // Registration anchors, one per nested layer: where its first tile sits on
+    // the sheet. Layers nested from the same origin share one, and T-15 reports
+    // the difference between any two that do not.
+    let mut anchors: std::collections::BTreeMap<u32, Point> = std::collections::BTreeMap::new();
+    for (index, _, plan) in &plans {
+        if let Some(first) = plan.tiles.first() {
+            anchors.insert(
+                *index,
+                Point {
+                    x: first.marks.part_anchor.left.x_mm,
+                    y: first.marks.part_anchor.left.y_mm,
+                },
+            );
+        }
+    }
+
+    let report =
+        validate_with_registration(&layers, profile, rules, verified, &tile_rects, &anchors);
+
+    Ok(Ok(Prepared {
+        layers,
+        plans,
+        report,
+    }))
+}
+
+#[cfg(test)]
+mod fixture_expectations {
+    use super::*;
+
+    fn repo(path: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(path)
+    }
+
+    /// Run a fixture the way its author saw it: the geometry as written, with no
+    /// automatic fix and no nesting. Expectations describe that run, so every
+    /// fixture claims a check on the *design* rather than on its repaired version.
+    fn plain_args(fixture: PathBuf) -> Args {
+        Args {
+            fixture,
+            material: repo("profiles/data/matte-vinyl-090.v4.json"),
+            plotter: repo("profiles/data/knife-25mm.v2.json"),
+            out_dir: std::env::temp_dir(),
+            widen_to: None,
+            nest: false,
+            bridge: false,
+            round: false,
+        }
+    }
+
+    fn fixture_paths() -> Vec<PathBuf> {
+        let dir = repo("fixtures");
+        let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|entry| entry.expect("cannot read a directory entry").path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no fixtures in {}", dir.display());
+        paths
+    }
+
+    /// The rule codes a report carries at one severity, deduplicated and sorted.
+    ///
+    /// A set, not a tally. *Which* checks fired is the claim a fixture makes; *how
+    /// many times* is an accident of how many edges or layers it happens to have,
+    /// and pinning it would make every harmless geometry edit a failure to argue
+    /// about.
+    fn codes(
+        report: &mask_validate::ValidationReport,
+        severity: mask_rules::Severity,
+    ) -> Vec<&str> {
+        let mut out: Vec<&str> = report
+            .violations
+            .iter()
+            .filter(|v| v.severity == severity)
+            .map(|v| v.code.as_str())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every fixture must do what its `_expect` block says.
+    ///
+    /// Without this the fixtures only describe themselves. A check that stops
+    /// firing, a fixture quietly edited until it trips nothing, a rule that starts
+    /// reporting something new — none of it would fail anything, and the suite
+    /// would still be green. This is the check that makes them executable.
+    #[test]
+    fn every_fixture_does_what_it_claims() {
+        let mut failures: Vec<String> = Vec::new();
+
+        for path in fixture_paths() {
+            let name = path
+                .file_stem()
+                .expect("a fixture path has a stem")
+                .to_string_lossy()
+                .into_owned();
+
+            let fixture = match load_fixture(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    failures.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+
+            let args = plain_args(path.clone());
+            let material = match MaterialProfile::load(&args.material) {
+                Ok(m) => m,
+                Err(e) => {
+                    failures.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let plotter = match PlotterProfile::load(&args.plotter) {
+                Ok(p) => p,
+                Err(e) => {
+                    failures.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let profile = CuttingProfile::derive(&material, &plotter);
+            let rules = RuleSet::from_profile(&profile);
+            let verified = profile.is_physically_verified(&material, &plotter);
+
+            match prepare(
+                &fixture, &material, &plotter, &profile, &rules, verified, &args,
+            ) {
+                Err(e) => failures.push(format!("{name}: {e}")),
+                Ok(Err(problems)) => {
+                    if fixture.expect.outcome != ExpectOutcome::Rejected {
+                        failures.push(format!(
+                            "{name}: expected a verdict, but the source gate refused it: {}",
+                            problems.join("; ")
+                        ));
+                    }
+                }
+                Ok(Ok(prepared)) => {
+                    let expect = &fixture.expect;
+                    if expect.outcome != ExpectOutcome::Verdict {
+                        failures.push(format!(
+                            "{name}: expected the source gate to refuse it, but it was validated as {:?}",
+                            prepared.report.verdict
+                        ));
+                        continue;
+                    }
+                    if Some(prepared.report.verdict) != expect.verdict {
+                        failures.push(format!(
+                            "{name}: expected verdict {:?}, got {:?}",
+                            expect.verdict, prepared.report.verdict
+                        ));
+                    }
+                    for (severity, label, expected) in [
+                        (mask_rules::Severity::Error, "error", &expect.errors),
+                        (mask_rules::Severity::Warning, "warning", &expect.warnings),
+                    ] {
+                        let mut expected = expected.clone();
+                        expected.sort();
+                        let actual = codes(&prepared.report, severity);
+                        if actual != expected {
+                            failures.push(format!(
+                                "{name}: {label} codes differ — expected {expected:?}, got {actual:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of {} fixtures no longer match their expectations:\n  - {}",
+            failures.len(),
+            fixture_paths().len(),
+            failures.join("\n  - ")
+        );
+    }
 }

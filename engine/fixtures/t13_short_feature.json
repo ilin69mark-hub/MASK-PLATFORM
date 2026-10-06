@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "TEST F1. A 90x55 mm figure whose outline has one non-collinear 0.32 mm edge. Expected: min_feature_length warning — the knife rounds that edge off — and no error, because the figure is wide enough to cut.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

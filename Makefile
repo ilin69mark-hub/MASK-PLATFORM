@@ -86,18 +86,9 @@ demo: ## Generate masks for a fixture (override with FIXTURE=…)
 		--out $(OUT)
 
 .PHONY: fixtures
-fixtures: ## Report the verdict of every fixture, with and without nesting
-	@for f in $(ENGINE)/fixtures/*.json; do \
-		n=$$(basename $$f .json); \
-		for mode in "" "--nest"; do \
-			out=$$(cd $(ENGINE) && $(CARGO) run -q -p mask-cli --bin maskctl -- \
-				--fixture $$f --material $(MATERIAL) --plotter $(PLOTTER) \
-				--widen-to $(WIDEN) $$mode --out /tmp/maskctl-reg 2>&1); \
-			v=$$(echo "$$out" | grep -oE 'Verdict: [A-Za-z_]+' | head -1); \
-			c=$$(echo "$$out" | grep -c 'wrote '); \
-			printf "  %-24s %-7s %-30s %s file(s)\n" "$$n" "$${mode:-plain}" "$${v:-no verdict}" "$$c"; \
-		done; \
-	done
+fixtures: ## Report every fixture against the verdict it declares
+	cd $(ENGINE) && $(CARGO) build -q -p mask-cli
+	@python3 $(ROOT)/tools/fixture_report.py $(ENGINE)
 
 .PHONY: spike
 spike: ## Re-run the geometry acceptance probe behind ADR-0003

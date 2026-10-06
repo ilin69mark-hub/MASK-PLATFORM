@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "TEST 3. A 6 mm patch floating inside a 120 mm ring, joined by a 1.5 mm band that runs from the top of the ring to the patch. The union closes the hole, so no island is reported. Expected: PASS. Physically the patch must stay attached through weed, position and peel. Bridge width 1.5 mm exceeds the 1.20 mm profile minimum.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

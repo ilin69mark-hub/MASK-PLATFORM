@@ -10,7 +10,14 @@
       180.0
     ]
   },
-  "_comment": "TEST 1. Element exactly at the 0.80 mm minimum. Expected: PASS, and the cut element must survive being weeded, positioned and peeled. If this fails, the profile minimum is too optimistic and must be raised.",
+  "_comment": "TEST 1. Element exactly at the 0.80 mm minimum. Expected: no errors, and the cut element must survive being weeded, positioned and peeled. If this fails, the profile minimum is too optimistic and must be raised. The verdict is PASS_WITH_WARNINGS, not PASS: min_feature_length fires on the short edges a stroke leaves at a line end, which says nothing about whether 0.80 mm can be held.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

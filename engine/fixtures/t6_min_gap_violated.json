@@ -11,6 +11,17 @@
     ]
   },
   "_comment": "TEST G1. Two bars 0.40 mm apart, below the 0.90 mm minimum gap. Expected: FAIL on min_gap, and the report must name both elements.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "min_gap"
+    ],
+    "warnings": [
+      "layer_density",
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

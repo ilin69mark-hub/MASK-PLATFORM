@@ -2,6 +2,13 @@
   "project_id": "MASK-TRACED-001",
   "revision": 1,
   "_comment": "TRACED from a 60x40 image at 120 mm wide, so 2 mm per pixel. Colour layers, no cut width: widths come from the profile. Validate before cutting.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "island_anchored"
+    ]
+  },
   "target": {
     "object": "Traced image",
     "part": "Traced",

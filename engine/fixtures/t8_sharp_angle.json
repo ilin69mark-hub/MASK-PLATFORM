@@ -10,7 +10,14 @@
       40.0
     ]
   },
-  "_comment": "TEST A1. A traced figure whose top vertex is about 21°, below the 30° minimum. Expected: min_angle warning naming that vertex; --round-corners fills it.",
+  "_comment": "TEST A3. A traced figure whose top vertex measures 20.6°, below the 30° minimum. Expected: min_angle warning naming that vertex; --round-corners fills it. Sits between the control (A1, 43.6°) and the sharp case (A2, 18.9°).",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_angle"
+    ]
+  },
   "layers": [
     {
       "index": 1,
@@ -19,24 +26,24 @@
         {
           "outer": [
             [
-              8,
-              8
+              14,
+              6
             ],
             [
-              32,
-              8
+              22,
+              6
             ],
             [
-              32,
-              20
+              22,
+              14
             ],
             [
-              20,
-              32
+              18,
+              36
             ],
             [
-              8,
-              20
+              14,
+              14
             ]
           ],
           "holes": []

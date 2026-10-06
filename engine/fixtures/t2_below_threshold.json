@@ -11,6 +11,16 @@
     ]
   },
   "_comment": "TEST 2. Widths just below the 0.80 mm minimum: 0.60, 0.70, 0.75. Expected: FAIL from the validator. Then cut it anyway by hand, because the point is to observe WHAT HAPPENS. The profile claims these cannot be held; the physical run is what decides whether that claim is true.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "min_line_width"
+    ],
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

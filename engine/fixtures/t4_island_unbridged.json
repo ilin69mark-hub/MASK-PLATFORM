@@ -11,6 +11,16 @@
     ]
   },
   "_comment": "TEST 4. The same ring and the same patch, with the bridge removed. Expected: FAIL on island_anchored. Cut it anyway. If the patch stays on the part, the island rule is over-strict and the island minimum can go below 0.80 mm. If it lifts or drops, the rule is right and the failure is the useful result.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "island_anchored"
+    ],
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

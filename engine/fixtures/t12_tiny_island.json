@@ -11,6 +11,17 @@
     ]
   },
   "_comment": "TEST D2. A single 1x1 mm piece, 1 mm² against the 2.40 mm² minimum. Expected: min_island_area error.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "FAIL",
+    "errors": [
+      "min_island_area"
+    ],
+    "warnings": [
+      "layer_density",
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,

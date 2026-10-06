@@ -11,6 +11,11 @@
     ]
   },
   "_comment": "TEST A1. A traced figure whose top vertex measures 43.6°, below nothing; see t9 for the sharp case. Kept as the clean control: an ordinary traced outline must raise nothing.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS",
+    "warnings": []
+  },
   "layers": [
     {
       "index": 1,

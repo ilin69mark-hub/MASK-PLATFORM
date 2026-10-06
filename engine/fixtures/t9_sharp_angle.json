@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "TEST A2. A traced spike whose top vertex measures about 18.9°, below the 30° minimum. Expected: min_angle warning naming the vertex; --round-corners fills it.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_angle"
+    ]
+  },
   "layers": [
     {
       "index": 1,

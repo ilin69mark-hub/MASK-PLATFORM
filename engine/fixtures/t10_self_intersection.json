@@ -11,6 +11,9 @@
     ]
   },
   "_comment": "TEST I1. A bow-tie region: the contour crosses itself at (30, 30). Expected: self_intersection as an error, with the crossing point named, and no automatic fix offered.",
+  "_expect": {
+    "outcome": "rejected"
+  },
   "layers": [
     {
       "index": 1,

@@ -11,6 +11,13 @@
     ]
   },
   "_comment": "TEST 5. Six layers on one panel in the intended application order. Expected: PASS. This is the target complexity for the MVP. The open question is not whether it validates but whether registration error accumulated across six weed-position-peel cycles still lands on a recognisable design. With a 0.35 mm registration tolerance and six cycles, that is the number to watch and the reason this test exists.",
+  "_expect": {
+    "outcome": "verdict",
+    "verdict": "PASS_WITH_WARNINGS",
+    "warnings": [
+      "min_feature_length"
+    ]
+  },
   "layers": [
     {
       "index": 1,
