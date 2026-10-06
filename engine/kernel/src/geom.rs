@@ -41,6 +41,34 @@ pub enum GeometryError {
     )]
     ArcRadius { index: usize, radius: f64 },
 
+    /// An arc so gentle that it is its own chord.
+    ///
+    /// The sagitta is how far an arc departs from the straight line between its
+    /// endpoints: `r − √(r² − (d/2)²)`. Once that falls below the canonical grid the
+    /// arc *is* the chord geometrically, while carrying a different radius, a
+    /// different path string and therefore a different content hash — two cuts that
+    /// cut the same thing, told apart by a number nothing can measure.
+    ///
+    /// It is also where measurements stop being numbers. The segment-area formula
+    /// squares the radius, so a large enough radius overflows to `NaN` and reaches the
+    /// manifest as a `null`, which reads as an absent measurement rather than as an
+    /// impossible one. Verified on the built artifact: a radius of 1e300 on a 10 mm
+    /// chord produced `area_mm2: null`.
+    ///
+    /// The companion to `ArcRadius`: a zero radius is not a curve, and neither is one
+    /// that bends by less than the grid. Both are the same claim — that this segment
+    /// of the path is straight.
+    #[error(
+        "arc {index} bends {deviation} mm from the {chord} mm straight line between its endpoints, \
+         less than the {quantum} mm grid; it is its own chord and cannot be measured"
+    )]
+    ArcBelowGrid {
+        index: usize,
+        deviation: f64,
+        chord: f64,
+        quantum: f64,
+    },
+
     /// An arc names points the contour does not have, or does not describe a curve
     /// the pipeline can actually draw.
     ///
@@ -395,6 +423,37 @@ impl Contour {
                     count,
                 });
             }
+
+            // And it has to be a curve rather than a very long slightly-bent chord.
+            //
+            // Written as `h² / (r + √(r² − h²))` rather than `r − √(r² − h²)` because
+            // the first form never computes `r²`. The second overflows to infinity for
+            // radii above ~1e154, and `inf − inf` is `NaN` — which then compares false
+            // against the grid and would let the worst case through. The rearranged
+            // form yields the correct answer, zero, without ever forming the square.
+            let from = self.points[arc.from];
+            let to = self.points[arc.to];
+            let chord = from.distance_to(to);
+            let half = chord / 2.0;
+            // A radius smaller than half the chord cannot reach both endpoints at
+            // all, so there is no circle to measure and the square root would be of a
+            // negative number.
+            if arc.radius < half {
+                return Err(GeometryError::ArcRadius {
+                    index,
+                    radius: arc.radius,
+                });
+            }
+            let root = (arc.radius * arc.radius - half * half).sqrt();
+            let deviation = (half * half) / (arc.radius + root);
+            if deviation < crate::constants::CANON_QUANTUM_MM {
+                return Err(GeometryError::ArcBelowGrid {
+                    index,
+                    deviation,
+                    chord,
+                    quantum: crate::constants::CANON_QUANTUM_MM,
+                });
+            }
         }
         Ok(())
     }
@@ -657,6 +716,103 @@ mod tests {
             .validate(LIMIT)
             .expect_err("one arc replaces one edge");
         assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    /// A square whose bottom edge is replaced by an arc of the given radius, bulging
+    /// downward. `ccw: false` because with the centre below the chord the short way
+    /// round is clockwise — a counter-clockwise arc about that centre really is most
+    /// of a circle, which is a different arc rather than a wrong answer.
+    fn square_under_arc(radius: f64) -> Contour {
+        Contour {
+            points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0)],
+            closed: true,
+            arcs: vec![ArcSegment {
+                from: 0,
+                to: 1,
+                centre: p(5.0, -radius),
+                radius,
+                ccw: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_arc_too_flat_to_measure_is_rejected() {
+        // The defect: a radius of 1e300 on a 10 mm chord is geometrically almost a
+        // straight line, and the segment-area formula squares the radius, so the area
+        // came out `NaN` and reached the manifest as `null` — which reads as "nothing
+        // was measured" rather than "this cannot be measured".
+        for radius in [1e300, 1e155, 1e6, 2e5] {
+            let err = square_under_arc(radius)
+                .validate(LIMIT)
+                .expect_err("a curve flatter than the grid is not a curve");
+            assert!(
+                matches!(err, GeometryError::ArcBelowGrid { .. }),
+                "r={radius} gave {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_flatness_limit_is_where_the_sagitta_says_it_is() {
+        // The threshold is not a round number chosen for legibility, so it is derived
+        // rather than asserted: for a chord `d` the sagitta approaches `d²/8r`, so the
+        // largest acceptable radius is `d² / (8 · quantum)`. On this 10 mm contour that
+        // is 125 000 mm — and a guess of 100 000 is on the wrong side of it, which is
+        // why this is computed.
+        let chord = 10.0;
+        let critical = (chord * chord) / (8.0 * crate::constants::CANON_QUANTUM_MM);
+        assert!(
+            square_under_arc(critical * 2.0).validate(LIMIT).is_err(),
+            "twice the critical radius must be rejected"
+        );
+        assert!(
+            square_under_arc(critical * 0.5).validate(LIMIT).is_ok(),
+            "half the critical radius must be kept"
+        );
+    }
+
+    #[test]
+    fn an_arc_that_bends_by_more_than_the_grid_is_kept() {
+        // The rule has to leave real fillets alone, or it is just a ban on curves.
+        // A 0.4 mm fillet on a 10 mm edge deviates 0.01 mm, a hundred times the grid.
+        assert!(
+            square_under_arc(5.0).validate(LIMIT).is_ok(),
+            "a semicircular bulge must survive"
+        );
+        assert!(
+            square_under_arc(1_000.0).validate(LIMIT).is_ok(),
+            "a 1 km radius on a 10 mm chord deviates 12.5 microns, above the grid"
+        );
+    }
+
+    #[test]
+    fn a_radius_smaller_than_half_the_chord_is_rejected() {
+        // No circle of that radius passes through both endpoints, so there is nothing
+        // to measure and the square root below would be of a negative number.
+        let err = square_under_arc(4.9)
+            .validate(LIMIT)
+            .expect_err("a 4.9 mm radius cannot span a 10 mm chord");
+        assert!(matches!(err, GeometryError::ArcRadius { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn the_flatness_check_does_not_overflow_on_a_huge_radius() {
+        // The reason the sagitta is computed as `h² / (r + √(r² − h²))`. Written as
+        // `r − √(r² − h²)` it is `inf − inf` past r ≈ 1e154, and `NaN` compares
+        // false against the grid, so the one input that must never be accepted would
+        // sail through. Pinned because the failure is invisible on every other input.
+        let contour = square_under_arc(1e155);
+        let err = contour.validate(LIMIT).expect_err("must not be accepted");
+        match err {
+            GeometryError::ArcBelowGrid { deviation, .. } => {
+                assert!(
+                    deviation.is_finite() && deviation >= 0.0,
+                    "deviation must be a real number, got {deviation}"
+                );
+            }
+            other => panic!("expected a flatness rejection, got {other:?}"),
+        }
     }
 
     #[test]
