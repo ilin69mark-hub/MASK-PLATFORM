@@ -189,6 +189,16 @@ pub struct LayerMetrics {
     pub density_per_100cm2: f64,
     /// Shortest edge anywhere in this layer, in millimetres.
     pub shortest_edge_mm: Option<f64>,
+    /// Width of each region, index-aligned with `geometry.shapes`, in millimetres.
+    ///
+    /// `min_width_mm` is the minimum of this list, so it cannot say which region is
+    /// narrow, nor which of several islands is too small to hold. T-03 needs both, and
+    /// the numbers were already being computed and then discarded by the `reduce`.
+    ///
+    /// `None` where a region has no measurable width at all. Reporting `0.0` there
+    /// would read as a measurement rather than as an absence, and `0.0` fails every
+    /// minimum.
+    pub region_widths_mm: Vec<Option<f64>>,
 }
 
 /// The result of one validation run.
@@ -503,22 +513,43 @@ fn measure_layer(layer: &LayerInput, curve_tolerance_mm: f64) -> LayerMetrics {
     // region stops being one piece. For a band they agree; for a bridged island
     // they do not, and `narrowest_neck` is the one that would have caught a 0.2 mm
     // bridge tab passing this check.
-    let min_width_mm = polygonal
+    // Per region, then reduced. The per-region list is kept, not folded away,
+    // because T-03 needs each region's own width: a layer has one narrowest element
+    // but many islands, and only the islands are asked to hold themselves up.
+    //
+    // The bisection behind both measures is the expensive part of validation, and
+    // it was already running once per region. Keeping the numbers costs nothing; the
+    // alternative was publishing `island_width_mm` in the manifest as an effective
+    // limit while no check ever compared against it.
+    let region_widths: Vec<(usize, f64)> = polygonal
         .shapes
         .iter()
-        .filter_map(|shape| min_width(&Shapes::single(shape.clone())))
-        .reduce(f64::min);
-    let narrowest = polygonal
-        .shapes
-        .iter()
-        .filter_map(|shape| narrowest_neck(&Shapes::single(shape.clone())))
-        .reduce(f64::min);
-    let narrowest_mm = match (min_width_mm, narrowest) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
+        .enumerate()
+        .filter_map(|(i, shape)| {
+            // `narrowest_neck` is included because `min_width` cannot see a thin
+            // appendage — a 4 mm band with a 0.2 mm whisker reports 4.000 mm
+            // (kernel/src/offset.rs). For an island that whisker is precisely the
+            // part that lifts, so measuring only the band would let it through.
+            let band = min_width(&Shapes::single(shape.clone()));
+            let neck = narrowest_neck(&Shapes::single(shape.clone()));
+            match (band, neck) {
+                (Some(a), Some(b)) => Some((i, a.min(b))),
+                (Some(a), None) => Some((i, a)),
+                (None, Some(b)) => Some((i, b)),
+                (None, None) => None,
+            }
+        })
+        .collect();
+
+    let min_width_mm = region_widths.iter().map(|(_, w)| *w).reduce(f64::min);
+    let narrowest_mm = min_width_mm;
+
+    // Widened to one entry per region so it indexes the same way as `geometry.shapes`;
+    // a region with no measurable width keeps its `None` rather than shifting the rest.
+    let mut region_widths_mm = vec![None; polygonal.shapes.len()];
+    for (index, width) in &region_widths {
+        region_widths_mm[*index] = Some(*width);
+    }
 
     LayerMetrics {
         index: layer.index,
@@ -533,6 +564,7 @@ fn measure_layer(layer: &LayerInput, curve_tolerance_mm: f64) -> LayerMetrics {
         min_island_area_mm2: smallest_region_area(&layer.geometry),
         density_per_100cm2: density_per_100cm2(&layer.geometry),
         shortest_edge_mm: shortest_edge_in(&layer.geometry),
+        region_widths_mm,
     }
 }
 
@@ -1188,10 +1220,75 @@ fn check_layer(
         }
     }
 
-    // min_island_width and min_island_area (T-03) — a region with too little film
-    // in it will not stay put. Two distinct requirements with two distinct
-    // thresholds in the profile, and the docs only ever named the area, so the
-    // rule table covered only the width.
+    // min_island_width (T-03) — the other half of the island rule.
+    //
+    // The rule was declared, documented as enforced, and published in the manifest
+    // as `effective_limits.island_width_mm`, and nothing ever compared against it. A
+    // manifest that states a limit the engine does not hold is worse than one that
+    // omits it, because the manifest is the document a third party trusts.
+    //
+    // The measurement was already being paid for: `metrics.region_widths_mm` comes
+    // from the same per-region bisection T-01 uses. This costs no extra geometry work.
+    //
+    // Every region is checked, not only the ones flagged as islands — a piece joined
+    // to the rest of the film still has to hold itself up, which is why this sits
+    // here rather than in the island check.
+    if let Some(rule) = rules.rule("min_island_width") {
+        let offenders: Vec<(usize, f64)> = metrics
+            .region_widths_mm
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.map(|width| (i, width)))
+            .filter(|(_, w)| !meets_threshold(*w, limits.island_width_mm))
+            .collect();
+        if !offenders.is_empty() {
+            let narrowest = offenders
+                .iter()
+                .map(|(_, w)| *w)
+                .fold(f64::INFINITY, f64::min);
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: Some(narrowest),
+                required: Some(limits.island_width_mm),
+                unit: Unit::Mm,
+                count: offenders.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} элемент(ов) уже минимальной ширины {}.",
+                    layer.index,
+                    layer.name,
+                    offenders.len(),
+                    format_measurement(narrowest, limits.island_width_mm)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    Action {
+                        id: "merge_region".into(),
+                        label: "Объединить с соседним элементом".into(),
+                        primary: true,
+                        estimated_fidelity_loss: Some(0.02),
+                    },
+                    Action {
+                        id: "bridge_region".into(),
+                        label: "Прикрепить мостом".into(),
+                        primary: false,
+                        estimated_fidelity_loss: Some(0.01),
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
+    // min_island_area (T-03) — a region with too little film in it will not stay put.
+    // The width is checked above; this is the area, and the two have separate
+    // thresholds in the profile because they fail for different reasons.
     //
     // Every region is checked, not only the ones flagged as islands: a piece that
     // is joined to the rest of the film still has to hold itself up.
@@ -3017,6 +3114,154 @@ mod tests {
             application_order: None,
             bridges: vec![],
         }
+    }
+
+    /// A profile where the island minimum is stricter than the line minimum.
+    ///
+    /// With the shipped pair (0.80 mm line, 0.60 mm island) `min_island_width` can
+    /// never be the sole cause of a failure: anything under 0.60 mm is also under
+    /// 0.80 mm, so T-01 reports it first. That domination is why the rule could sit
+    /// unimplemented for so long without any verdict changing — nothing in the output
+    /// ever depended on it. A profile where the island must be wider than any line
+    /// is the only way to observe the rule on its own, and that is what this is for.
+    fn profile_with_wide_islands() -> CuttingProfile {
+        let mut cutting = profile();
+        cutting.limits.island_width_mm = 2.00;
+        cutting
+    }
+
+    #[test]
+    fn an_island_narrower_than_the_minimum_fails_t03_width() {
+        // The rule was declared, published in the manifest as an effective limit, and
+        // never compared against anything. A manifest that states a limit the engine
+        // does not hold is worse than one that omits it.
+        let narrow = layer(Shapes::single(Shape {
+            outer: Contour::straight(
+                vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 1.0, y: 0.0 },
+                    Point { x: 1.0, y: 10.0 },
+                    Point { x: 0.0, y: 10.0 },
+                ],
+                true,
+            ),
+            holes: vec![],
+        }));
+
+        let cutting = profile_with_wide_islands();
+        let report = validate(&[narrow], &cutting, &RuleSet::from_profile(&cutting), true);
+
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_island_width")
+            .unwrap_or_else(|| {
+                panic!(
+                    "a 1 mm wide island under a 2 mm minimum must violate the rule; got {:?}",
+                    report
+                        .violations
+                        .iter()
+                        .map(|v| &v.code)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(v.severity, Severity::Error);
+        assert!((v.measured.expect("measured") - 1.0).abs() < 0.01);
+        assert_eq!(v.required, Some(2.00));
+    }
+
+    #[test]
+    fn an_island_wide_enough_says_nothing_about_its_width() {
+        let wide = layer(Shapes::single(Shape {
+            outer: Contour::straight(
+                vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 3.0, y: 0.0 },
+                    Point { x: 3.0, y: 10.0 },
+                    Point { x: 0.0, y: 10.0 },
+                ],
+                true,
+            ),
+            holes: vec![],
+        }));
+
+        let cutting = profile_with_wide_islands();
+        let report = validate(&[wide], &cutting, &RuleSet::from_profile(&cutting), true);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "min_island_width"),
+            "a 3 mm island meets a 2 mm minimum: {:?}",
+            report
+                .violations
+                .iter()
+                .map(|v| &v.code)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn only_the_narrow_regions_are_named_not_the_whole_layer() {
+        // A layer of mixed widths must report the offenders and their count, or the
+        // message sends the operator to redraw a layer that was already fine.
+        let shapes = vec![
+            Shape {
+                outer: Contour::straight(
+                    vec![
+                        Point { x: 0.0, y: 0.0 },
+                        Point { x: 3.0, y: 0.0 },
+                        Point { x: 3.0, y: 10.0 },
+                        Point { x: 0.0, y: 10.0 },
+                    ],
+                    true,
+                ),
+                holes: vec![],
+            },
+            Shape {
+                outer: Contour::straight(
+                    vec![
+                        Point { x: 0.0, y: 20.0 },
+                        Point { x: 0.5, y: 20.0 },
+                        Point { x: 0.5, y: 30.0 },
+                        Point { x: 0.0, y: 30.0 },
+                    ],
+                    true,
+                ),
+                holes: vec![],
+            },
+            Shape {
+                outer: Contour::straight(
+                    vec![
+                        Point { x: 0.0, y: 40.0 },
+                        Point { x: 0.8, y: 40.0 },
+                        Point { x: 0.8, y: 50.0 },
+                        Point { x: 0.0, y: 50.0 },
+                    ],
+                    true,
+                ),
+                holes: vec![],
+            },
+        ];
+
+        let cutting = profile_with_wide_islands();
+        let report = validate(
+            &[layer(Shapes { shapes })],
+            &cutting,
+            &RuleSet::from_profile(&cutting),
+            true,
+        );
+
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "min_island_width")
+            .expect("two of the three regions are under 2 mm");
+        assert_eq!(v.count, 2, "the 3 mm region must not be counted");
+        assert!(
+            (v.measured.expect("measured") - 0.5).abs() < 0.01,
+            "measured is the narrowest offender, not the whole layer"
+        );
     }
 
     /// The measurement must follow the curve, not the polygon inside it.

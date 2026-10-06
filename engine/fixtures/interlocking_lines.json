@@ -10,12 +10,13 @@
       1046.0
     ]
   },
-  "_comment": "Hand-authored centrelines for the walking skeleton. Three layers meet the 0.80 mm minimum and one does not (L04 Gold Accent, 0.55 mm), and every layer is drawn far larger than the 284 mm working field, so the project needs nesting. The verdict is FAIL and the messages can be reviewed. The lines interlock, cross and loop, which is the target graphic class (LAYER_GRAPH.md).",
+  "_comment": "Hand-authored centrelines for the walking skeleton. Three layers meet the 0.80 mm minimum and one does not (L04 Gold Accent, 0.55 mm), which is under two different limits at once: min_line_width for an element that is not wide enough to hold, and min_island_width (0.60 mm) for a piece that is not wide enough to stay put on its own. Every layer is drawn far larger than the 284 mm working field, so the project needs nesting. The verdict is FAIL and the messages can be reviewed. The lines interlock, cross and loop, which is the target graphic class (LAYER_GRAPH.md).",
   "_expect": {
     "outcome": "verdict",
     "verdict": "FAIL",
     "errors": [
       "layer_fits_field",
+      "min_island_width",
       "min_line_width"
     ],
     "warnings": [
