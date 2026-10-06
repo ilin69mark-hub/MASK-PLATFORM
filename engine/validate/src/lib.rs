@@ -354,7 +354,7 @@ pub fn validate_with_registration(
     }
 
     for layer in layers {
-        let measured = measure_layer(layer);
+        let measured = measure_layer(layer, profile.limits.curve_tolerance_mm);
         check_layer(
             layer,
             &measured,
@@ -483,8 +483,16 @@ pub fn validate_with_registration(
 }
 
 /// Measure one layer. Geometry errors degrade to `None`, never to a panic.
-fn measure_layer(layer: &LayerInput) -> LayerMetrics {
+/// Measure one layer, flattening curves for the measurements that cannot read them.
+///
+/// `min_width` and `narrowest_neck` work on polygons. Given a contour with arcs
+/// they read `.points` and return the width of the chords — which for a curved
+/// region is not a slightly wrong answer but a different shape, and it is the
+/// shape whose narrowness decides whether the piece passes. The tolerance is the
+/// profile's own, so the measurement belongs to the blade that has to cut it.
+fn measure_layer(layer: &LayerInput, curve_tolerance_mm: f64) -> LayerMetrics {
     let (min_x, min_y, w, h) = bounding_box(&layer.geometry);
+    let polygonal = layer.geometry.flattened(curve_tolerance_mm);
 
     // Each shape is a separate region of film, so the layer's narrowest element
     // is the minimum across regions. min_width works on a Shapes set, so each
@@ -495,14 +503,12 @@ fn measure_layer(layer: &LayerInput) -> LayerMetrics {
     // region stops being one piece. For a band they agree; for a bridged island
     // they do not, and `narrowest_neck` is the one that would have caught a 0.2 mm
     // bridge tab passing this check.
-    let min_width_mm = layer
-        .geometry
+    let min_width_mm = polygonal
         .shapes
         .iter()
         .filter_map(|shape| min_width(&Shapes::single(shape.clone())))
         .reduce(f64::min);
-    let narrowest = layer
-        .geometry
+    let narrowest = polygonal
         .shapes
         .iter()
         .filter_map(|shape| narrowest_neck(&Shapes::single(shape.clone())))
@@ -1088,7 +1094,7 @@ fn check_layer(
     // Errors rather than warnings. The geometry is not measurable, so a verdict
     // that let it pass would be reporting on something undefined.
     if let Some(rule) = rules.rule("self_intersection") {
-        let found = self_intersections(&layer.geometry);
+        let found = self_intersections(&layer.geometry.flattened(limits.curve_tolerance_mm));
         if !found.is_empty() {
             let first = found[0];
             violations.push(Violation {
@@ -2902,6 +2908,90 @@ mod tests {
             !report.violations.iter().any(|v| v.code == "corner_radius"),
             "{:?}",
             report.violations
+        );
+    }
+    /// A disc, or the same disc with its arcs removed.
+    ///
+    /// `min_width` is documented to find the width of one band, so a ring is the
+    /// wrong instrument — it reports the outer diameter and says so. A disc is the
+    /// right one: its width is its diameter, and that is a number T-01 acts on.
+    fn disc(r: f64, with_arcs: bool) -> Shapes {
+        use mask_kernel::geom::{ArcSegment, Contour, Point};
+        const N: usize = 16;
+        let points = (0..N)
+            .map(|i| {
+                let a = std::f64::consts::TAU * (i as f64 / N as f64);
+                Point {
+                    x: r * a.cos(),
+                    y: r * a.sin(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let arcs = if with_arcs {
+            (0..N)
+                .map(|i| ArcSegment {
+                    from: i,
+                    to: (i + 1) % N,
+                    centre: Point { x: 0.0, y: 0.0 },
+                    radius: r,
+                    ccw: true,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Shapes::single(mask_kernel::Shape::new(Contour {
+            points,
+            closed: true,
+            arcs,
+        }))
+    }
+
+    fn layer(geometry: Shapes) -> LayerInput {
+        LayerInput {
+            index: 0,
+            name: "disc".into(),
+            geometry,
+            application_order: None,
+            bridges: vec![],
+        }
+    }
+
+    /// The measurement must follow the curve, not the polygon inside it.
+    ///
+    /// `min_width` bisects on inward offsets, so whatever the contour's boundary
+    /// says is what T-01 compares against the material's minimum line width.
+    ///
+    /// Asserted as a relationship rather than a fixed percentage: flattening must
+    /// land closer to the true diameter than the chords do. A 16-gon of radius 3 is
+    /// 5.885 mm across against a true 6.000, and flattening at the blade's 0.08 mm
+    /// tolerance refines it to roughly 32 segments and about 5.97. The margin is
+    /// real but it is about 1.5%, which is worth knowing: at a limit set exactly on
+    /// this measurement, a curve and its chords could land either side of it.
+    #[test]
+    fn a_disc_is_measured_from_its_arcs() {
+        let tolerance = profile().limits.curve_tolerance_mm;
+        let truth = 6.0;
+        let width_of = |geometry| {
+            measure_layer(&layer(geometry), tolerance)
+                .min_width_mm
+                .expect("a disc has a width")
+        };
+
+        let from_arcs = width_of(disc(3.0, true));
+        let from_chords = width_of(disc(3.0, false));
+
+        assert!(
+            (from_arcs - truth).abs() < (from_chords - truth).abs(),
+            "flattening must be the closer answer: arcs {from_arcs}, chords {from_chords}, truth {truth}"
+        );
+        assert!(
+            (from_arcs - truth).abs() < truth * 0.01,
+            "flattening at {tolerance} mm should be within 1% of {truth}, got {from_arcs}"
+        );
+        assert!(
+            from_chords < 0.99 * truth,
+            "and the chords should still be measurably short, got {from_chords}"
         );
     }
 }

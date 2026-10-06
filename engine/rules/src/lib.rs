@@ -24,6 +24,14 @@ pub struct EffectiveLimits {
     /// Longest cuttable tab, from `material.minimums.bridge_length_mm`.
     pub bridge_length_mm: f64,
     pub corner_radius_mm: f64,
+    /// The blade's chord tolerance, carried through so the geometry pipeline can
+    /// flatten curves at the tolerance that belongs to the blade doing the cutting.
+    ///
+    /// It used to reach only the `corner_radius` derivation and then vanish, which
+    /// left every downstream consumer with no honest way to approximate a curve: no
+    /// tolerance, or one invented at the call site. A derived number nobody can
+    /// reach is not a derived number.
+    pub curve_tolerance_mm: f64,
     /// Minimum interior angle, from `material.limits.min_angle_deg`.
     pub min_angle_deg: f64,
     pub bridge_width_mm: f64,
@@ -102,6 +110,11 @@ impl CuttingProfile {
             r(island_width_mm)
         ));
 
+        derivation.push(format!(
+            "curve_tolerance = blade.curve_tolerance = {}",
+            r(b.curve_tolerance_mm)
+        ));
+
         let corner_candidate = b.curve_tolerance_mm * b.curve_multiplier;
         let corner_radius_mm = m.corner_radius_mm.max(corner_candidate);
         derivation.push(format!(
@@ -149,6 +162,7 @@ impl CuttingProfile {
                 feature_length_mm: material.minimums.feature_length_mm,
                 bridge_length_mm: material.minimums.bridge_length_mm,
                 corner_radius_mm,
+                curve_tolerance_mm: b.curve_tolerance_mm,
                 min_angle_deg: material.limits.min_angle_deg,
                 bridge_width_mm,
                 max_features_per_100cm2: material.limits.max_density_per_100cm2,
@@ -520,9 +534,29 @@ mod tests {
     #[test]
     fn derivation_records_every_step() {
         let cp = CuttingProfile::derive(&material(), &plotter());
-        assert_eq!(cp.derivation.len(), 6, "all six formulas must be auditable");
+        assert_eq!(
+            cp.derivation.len(),
+            7,
+            "all seven formulas must be auditable"
+        );
         assert!(cp.derivation.iter().any(|d| d.starts_with("line_width")));
         assert!(cp.derivation.iter().any(|d| d.starts_with("max_tile")));
+        // The seventh is the blade's chord tolerance, which the geometry pipeline
+        // needs and which used to be dropped here after feeding corner_radius. A
+        // limit nobody downstream can reach is not a limit, only a note.
+        assert!(cp
+            .derivation
+            .iter()
+            .any(|d| d.starts_with("curve_tolerance")));
+    }
+
+    /// The derivation count is a tripwire, so it is worth saying what it is for: a
+    /// new step has to be both counted and named. Bumping the number alone would
+    /// have kept the test green while hiding what changed.
+    #[test]
+    fn the_curve_tolerance_survives_the_derivation() {
+        let cp = CuttingProfile::derive(&material(), &plotter());
+        assert_eq!(cp.limits.curve_tolerance_mm, 0.08);
     }
 
     #[test]

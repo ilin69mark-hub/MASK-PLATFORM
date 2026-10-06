@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::OverlayError;
+
 /// Maximum number of points accepted in a single contour (MASK_PROJECT §8).
 pub const MAX_POINTS_PER_PATH: usize = 20_000;
 
@@ -425,6 +427,52 @@ pub struct Shapes {
 }
 
 impl Shapes {
+    /// Flatten every curve to line segments within `tolerance_mm`.
+    ///
+    /// The explicit way to hand this geometry to something that only understands
+    /// polygons. Operations like union and offset have no closed form for arcs, so
+    /// they have to approximate, and an approximation needs a tolerance that came
+    /// from the plotter profile rather than from a default somebody forgot about.
+    #[must_use]
+    pub fn flattened(&self, tolerance_mm: f64) -> Shapes {
+        if self
+            .shapes
+            .iter()
+            .all(|s| s.outer.arcs.is_empty() && s.holes.iter().all(|h| h.arcs.is_empty()))
+        {
+            return self.clone();
+        }
+        Shapes {
+            shapes: self
+                .shapes
+                .iter()
+                .map(|s| Shape {
+                    outer: s.outer.flattened(tolerance_mm),
+                    holes: s.holes.iter().map(|h| h.flattened(tolerance_mm)).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Reject geometry that still carries curves.
+    ///
+    /// Used by the operations that are polygon-only. The failure this prevents is
+    /// the one this project keeps meeting: not an approximation, but a number that
+    /// reads `.points` and silently reports the geometry of the chords instead.
+    /// Returning the chords' result was never acceptable; returning an error that
+    /// names the tolerance to use is.
+    pub fn require_polygonal(&self) -> Result<(), OverlayError> {
+        let curved = self
+            .shapes
+            .iter()
+            .any(|s| !s.outer.arcs.is_empty() || s.holes.iter().any(|h| !h.arcs.is_empty()));
+        if curved {
+            Err(OverlayError::CurvedGeometry)
+        } else {
+            Ok(())
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
