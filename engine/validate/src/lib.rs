@@ -12,7 +12,8 @@
 
 use mask_kernel::{
     bounding_box, format_degrees, format_measurement, meets_threshold, min_gap, min_width,
-    shapes_area, sharp_corners, unanchored_islands, Contour, Point, Shape, Shapes,
+    open_cut_contours, self_intersections, shapes_area, sharp_corners, unanchored_islands, Contour,
+    Point, Shape, Shapes,
 };
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
@@ -575,6 +576,94 @@ fn check_layer(
                         label: "Скруглить углы".into(),
                         primary: true,
                         estimated_fidelity_loss: Some(0.005),
+                    },
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать элементы".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
+    // self_intersection (T-08) — a contour that crosses itself. Signed area
+    // assumes simplicity: the crossings cut the contour into lobes that cancel, so
+    // the reported area is plausible and wrong. This project has been bitten twice
+    // by that shape of defect and both times nothing complained, because a wrong
+    // area looks like a number.
+    //
+    // Errors rather than warnings. The geometry is not measurable, so a verdict
+    // that let it pass would be reporting on something undefined.
+    if let Some(rule) = rules.rule("self_intersection") {
+        let found = self_intersections(&layer.geometry);
+        if !found.is_empty() {
+            let first = found[0];
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: None,
+                required: None,
+                unit: Unit::Mm,
+                count: found.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} пересечений контура. Первое — в ({}; {}).",
+                    layer.index,
+                    layer.name,
+                    found.len(),
+                    mask_kernel::report(first.at.x),
+                    mask_kernel::report(first.at.y)
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    // Deliberately not "fix automatically": resolving a
+                    // self-intersection reshapes the figure, and a mask is a
+                    // physical object cut from film.
+                    Action {
+                        id: "show_elements".into(),
+                        label: "Показать пересечения".into(),
+                        primary: true,
+                        estimated_fidelity_loss: None,
+                    },
+                    Action {
+                        id: "normalise".into(),
+                        label: "Пересобрать геометрию (меняет рисунок)".into(),
+                        primary: false,
+                        estimated_fidelity_loss: None,
+                    },
+                ],
+            });
+        }
+    }
+
+    // open_cut_path (T-09) — a cut contour left open. The knife follows it off the
+    // sheet.
+    if let Some(rule) = rules.rule("open_cut_path") {
+        let open = open_cut_contours(&layer.geometry);
+        if !open.is_empty() {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                layer_index: Some(layer.index),
+                measured: None,
+                required: None,
+                unit: Unit::Mm,
+                count: open.len(),
+                headline: format!(
+                    "Слой {} «{}»: {} режущих контуров не замкнуты.",
+                    layer.index,
+                    layer.name,
+                    open.len()
+                ),
+                reason: rule.reason.to_string(),
+                actions: vec![
+                    Action {
+                        id: "close_path".into(),
+                        label: "Замкнуть контур".into(),
+                        primary: true,
+                        estimated_fidelity_loss: Some(0.0),
                     },
                     Action {
                         id: "show_elements".into(),
@@ -1152,6 +1241,141 @@ mod tests {
             .expect("the applicability note");
         assert!(note.reason.contains("min_angle"), "{}", note.reason);
         assert_eq!(note.severity, Severity::Info);
+    }
+
+    /// A bow tie: the classic crossed contour.
+    fn bowtie_layer(index: u32) -> LayerInput {
+        let contour = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 20.0 },
+                Point { x: 20.0, y: 0.0 },
+                Point { x: 0.0, y: 20.0 },
+            ],
+            closed: true,
+        };
+        LayerInput {
+            index,
+            name: format!("Layer {index}"),
+            geometry: Shapes {
+                shapes: vec![Shape::new(contour)],
+            },
+        }
+    }
+
+    #[test]
+    fn a_self_crossing_contour_is_an_error_not_a_warning() {
+        // The distinction matters: the geometry is not measurable at all, so a
+        // verdict that let it through would be reporting on something undefined.
+        let report = run(vec![bowtie_layer(1)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "self_intersection")
+            .expect("a bow tie must be caught");
+        assert_eq!(v.severity, Severity::Error);
+        assert_eq!(v.count, 1);
+        assert!(matches!(report.verdict, Verdict::Fail));
+        // Two errors, not one: a bow tie also has zero width somewhere, so the
+        // width rule fires too. Asserting one would have been asserting that the
+        // bow tie is not degenerate, which is not the point.
+        assert!(
+            report.counts.error >= 1,
+            "at least the crossing itself must be an error"
+        );
+    }
+
+    #[test]
+    fn a_crossing_is_reported_with_the_point_it_occurs_at() {
+        // "Somewhere in this contour" is not actionable; a coordinate is.
+        let report = run(vec![bowtie_layer(1)]);
+        let text = render(&report);
+        // Coordinates are rounded to the canonical three decimals (ADR-0004).
+        assert!(text.contains('('), "the location should be shown: {text}");
+        assert!(text.contains("10"), "the crossing is at (10, 10): {text}");
+    }
+
+    #[test]
+    fn self_intersection_offers_no_silent_automatic_fix() {
+        // Resolving a crossing reshapes the figure. A mask is a physical object cut
+        // from film, so the operator decides, not the validator.
+        let report = run(vec![bowtie_layer(1)]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "self_intersection")
+            .expect("v");
+        assert!(
+            !v.actions.iter().any(|a| a.id == "autofix"),
+            "there must be no plain automatic fix: {:?}",
+            v.actions
+        );
+        assert!(
+            v.actions.iter().any(|a| a.id == "normalise"),
+            "but the explicit rebuild must be offered: {:?}",
+            v.actions
+        );
+    }
+
+    #[test]
+    fn an_ordinary_square_raises_no_self_intersection() {
+        // Every polygon shares vertices between its own edges. Counting those would
+        // make the rule fire on everything and drown the real violations.
+        let report = run(vec![layer_from_contours(
+            1,
+            "Square",
+            vec![vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]]],
+        )]);
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.code == "self_intersection"),
+            "{:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn an_open_cut_contour_is_reported() {
+        let open = Contour {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 20.0, y: 0.0 },
+                Point { x: 20.0, y: 20.0 },
+            ],
+            closed: false,
+        };
+        let layer = LayerInput {
+            index: 1,
+            name: "Open".into(),
+            geometry: Shapes {
+                shapes: vec![Shape::new(open)],
+            },
+        };
+        let report = run(vec![layer]);
+        let v = report
+            .violations
+            .iter()
+            .find(|v| v.code == "open_cut_path")
+            .expect("an unclosed cut contour must be caught");
+        assert_eq!(v.severity, Severity::Error);
+        assert_eq!(v.count, 1);
+        assert!(matches!(report.verdict, Verdict::Fail));
+    }
+
+    #[test]
+    fn a_closed_layer_raises_no_open_cut_path() {
+        let report = run(vec![layer_from_contours(
+            1,
+            "Closed",
+            vec![vec![[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]]],
+        )]);
+        assert!(
+            !report.violations.iter().any(|v| v.code == "open_cut_path"),
+            "{:?}",
+            report.violations
+        );
     }
 
     #[test]

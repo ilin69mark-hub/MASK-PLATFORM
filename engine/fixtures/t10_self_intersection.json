@@ -1,0 +1,43 @@
+{
+  "project_id": "MASK-INT-001",
+  "revision": 1,
+  "target": {
+    "object": "Integrity probe",
+    "part": "Flat",
+    "part_code": "INT",
+    "dimensions_mm": [
+      60.0,
+      60.0
+    ]
+  },
+  "_comment": "TEST I1. A bow-tie region: the contour crosses itself at (30, 30). Expected: self_intersection as an error, with the crossing point named, and no automatic fix offered.",
+  "layers": [
+    {
+      "index": 1,
+      "name": "Bow Tie",
+      "regions": [
+        {
+          "outer": [
+            [
+              10,
+              10
+            ],
+            [
+              50,
+              50
+            ],
+            [
+              50,
+              10
+            ],
+            [
+              10,
+              50
+            ]
+          ],
+          "holes": []
+        }
+      ]
+    }
+  ]
+}

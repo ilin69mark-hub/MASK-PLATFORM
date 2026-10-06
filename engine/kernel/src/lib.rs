@@ -15,6 +15,7 @@ pub mod corner;
 pub mod gap;
 pub mod geom;
 pub mod hash;
+pub mod integrity;
 pub mod measure;
 pub mod offset;
 pub mod raster;
@@ -31,6 +32,7 @@ pub use corner::{
 pub use gap::{gaps_per_region, min_gap, Gap};
 pub use geom::{Contour, GeometryError, Point, Shape, Shapes};
 pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
+pub use integrity::{open_cut_contours, self_intersections, OpenContour, SelfIntersection};
 pub use measure::{
     bounding_box, contour_perimeter, format_degrees, format_measurement, meets_threshold,
     point_in_contour, shape_area, shape_bounds, shapes_area, signed_contour_area,

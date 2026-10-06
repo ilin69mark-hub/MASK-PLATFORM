@@ -349,6 +349,60 @@ fn default_width() -> f64 {
     1.0
 }
 
+/// Reject geometry that is not well formed, before any merge touches it.
+///
+/// Returns the problems as operator-readable strings, so the caller decides what
+/// to do about them rather than this function stopping on the first one.
+fn check_source_integrity(fixture: &Fixture) -> Result<(), Vec<String>> {
+    let mut problems = Vec::new();
+
+    for layer in &fixture.layers {
+        for (index, region) in layer.regions.iter().enumerate() {
+            let mut shapes: Vec<mask_kernel::Shape> = Vec::new();
+            let outer = Contour {
+                points: region
+                    .outer
+                    .iter()
+                    .map(|[x, y]| Point { x: *x, y: *y })
+                    .collect(),
+                closed: true,
+            };
+            let mut shape = mask_kernel::Shape::new(outer);
+            shape.holes = region
+                .holes
+                .iter()
+                .map(|h| Contour {
+                    points: h.iter().map(|[x, y]| Point { x: *x, y: *y }).collect(),
+                    closed: true,
+                })
+                .collect();
+            shapes.push(shape);
+
+            let one = mask_kernel::Shapes { shapes };
+            let crossings = mask_kernel::self_intersections(&one);
+            if !crossings.is_empty() {
+                let at = crossings[0].at;
+                problems.push(format!(
+                    "L{:02} «{}» region {}: the contour crosses itself {} time(s), first at ({:.4}; {:.4}). Its signed area is {} mm², which is not the area of the figure.",
+                    layer.index,
+                    layer.name,
+                    index + 1,
+                    crossings.len(),
+                    at.x,
+                    at.y,
+                    mask_kernel::report(mask_kernel::measure::shapes_area(&one))
+                ));
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
 /// Convert a fixture region into validated geometry.
 fn region_to_shape(region: &FixtureRegion) -> Result<Shape, String> {
     fn contour(points: &[Vec<[f64; 2]>], what: &str) -> Result<Contour, String> {
@@ -497,6 +551,27 @@ fn run(args: &Args) -> Result<bool, String> {
         println!("  {line}");
     }
     println!();
+
+    // Integrity is checked on the geometry as written, before anything is merged.
+    //
+    // This is not defensive tidiness. `build_layer` unions every region of a layer
+    // into one piece, and the union resolves self-intersections: a bow tie goes in
+    // as one contour reporting 0 mm² — its two lobes cancel exactly — and comes out
+    // as two 400 mm² triangles. Nothing is reported. The operator's figure was
+    // ambiguous, the engine picked an interpretation, and the only evidence is a
+    // geometry that no longer looks like what they drew.
+    if let Err(problems) = check_source_integrity(&fixture) {
+        for problem in &problems {
+            eprintln!("{problem}");
+        }
+        eprintln!(
+            "\nПроблем в исходной геометрии: {}. Экспорт не выполнялся.",
+            problems.len()
+        );
+        eprintln!("Объединение разрешает самопересечения и молча меняет рисунок.");
+        eprintln!("Исправьте исходник или пересоберите его осознанно и проверьте результат.");
+        return Ok(false);
+    }
 
     // Bridging runs before widening, because a tab added to a centreline that is
     // about to be stroked would then be stroked too, and the tab would come out
