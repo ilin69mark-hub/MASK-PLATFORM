@@ -355,6 +355,62 @@ pub fn validate_with_registration(
         metrics.push(measured);
     }
 
+    // peelability (T-11) — not modelled, and the rule exists to say so.
+    //
+    // Peelability is not a geometric threshold. Whether a feature survives being
+    // removed depends on the film, the adhesive and the angle the operator pulls
+    // at, and the only real number available is `peel_angle_min_deg`, which comes
+    // from a physical test on a real sheet. Nothing in the geometry can be compared
+    // against it that would mean anything.
+    //
+    // What geometry does cover is already checked: a feature too thin to hold is
+    // T-01, too little of it to stay put is T-03, and one that will fall off is
+    // T-04. So this note is not covering a gap — it is saying the remaining
+    // physics is a procedure, not a measurement.
+    //
+    // One thing it does check: that the profile's peel rate is one this build can
+    // interpret. A value nobody recognises means the declared behaviour is not
+    // being applied, which would silently weaken every future check here.
+    if let Some(rule) = rules.rule("peelability") {
+        let known = matches!(
+            profile.limits.peel_rate.as_str(),
+            "slow" | "moderate" | "fast"
+        );
+        if known {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: Severity::Info,
+                layer_index: None,
+                measured: None,
+                required: Some(profile.limits.line_width_mm),
+                unit: Unit::Mm,
+                count: 0,
+                headline: "Снятие не смоделировано: это процедура, а не измерение.".into(),
+                reason: format!(
+                    "Плёнка снимается под углом не менее {}° со скоростью {}. Геометрия проверяется через ширину (T-01) и островки (T-03).",
+                    profile.limits.peel_angle_min_deg, profile.limits.peel_rate
+                ),
+                actions: vec![Action { id: "acknowledge".into(), label: "Понятно".into(), primary: false, estimated_fidelity_loss: None }],
+            });
+        } else {
+            violations.push(Violation {
+                code: rule.code.clone(),
+                severity: Severity::Warning,
+                layer_index: None,
+                measured: None,
+                required: Some(profile.limits.line_width_mm),
+                unit: Unit::Mm,
+                count: 0,
+                headline: format!(
+                    "Скорость снятия «{}» этой сборке неизвестна.",
+                    profile.limits.peel_rate
+                ),
+                reason: "Заявленное поведение плёнки не будет применено: снятие и так не смоделировано, а теперь даже его параметры прочитать нельзя.".into(),
+                actions: vec![Action { id: "review_profile".into(), label: "Проверить профиль материала".into(), primary: true, estimated_fidelity_loss: None }],
+            });
+        }
+    }
+
     // T-05 is stated as a radius and cannot be measured on polygonal contours:
     // every vertex has radius zero, so the number is not in the geometry. Saying
     // so once per run is right — six copies would bury the real violations.
@@ -2287,6 +2343,82 @@ mod tests {
             .expect("v");
         assert!(v.headline.contains("плоттера"), "{}", v.headline);
         assert!(v.headline.contains("вложения"), "{}", v.headline);
+    }
+
+    /// The same profile with a peel rate overridden.
+    fn with_peel_rate(rate: &str) -> CuttingProfile {
+        let mut cp = profile();
+        cp.limits.peel_rate = rate.to_string();
+        cp
+    }
+
+    #[test]
+    fn peelability_is_reported_as_a_procedure_not_a_measurement() {
+        let report = run(vec![band_layer(1, 0.80, 200.0)]);
+        let note = report
+            .violations
+            .iter()
+            .find(|v| v.code == "peelability")
+            .expect("the note must be present");
+        assert_eq!(
+            note.severity,
+            Severity::Info,
+            "nothing is being measured, so nothing fails"
+        );
+        assert!(
+            note.reason.contains("120"),
+            "the declared angle should be shown: {}",
+            note.reason
+        );
+        assert!(
+            note.reason.contains("T-01"),
+            "it should say what is checked instead: {}",
+            note.reason
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_peel_rate_is_a_warning() {
+        // A new material must not be rejected just because this build has not heard
+        // of its rate, but the declared behaviour must not be silently ignored
+        // either.
+        let cp = with_peel_rate("unheard_of");
+        let report = validate(
+            &[band_layer(1, 0.80, 200.0)],
+            &cp,
+            &RuleSet::from_profile(&cp),
+            true,
+        );
+        let note = report
+            .violations
+            .iter()
+            .find(|v| v.code == "peelability")
+            .expect("the note must be present");
+        assert_eq!(
+            note.severity,
+            Severity::Warning,
+            "a rate nobody can read is worth a warning"
+        );
+        assert!(note.headline.contains("unheard_of"), "{}", note.headline);
+    }
+
+    #[test]
+    fn every_known_peel_rate_is_accepted() {
+        for rate in ["slow", "moderate", "fast"] {
+            let cp = with_peel_rate(rate);
+            let report = validate(
+                &[band_layer(1, 0.80, 200.0)],
+                &cp,
+                &RuleSet::from_profile(&cp),
+                true,
+            );
+            let note = report
+                .violations
+                .iter()
+                .find(|v| v.code == "peelability")
+                .expect("note");
+            assert_eq!(note.severity, Severity::Info, "{rate} should be understood");
+        }
     }
 
     #[test]

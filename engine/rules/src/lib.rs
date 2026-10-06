@@ -35,6 +35,11 @@ pub struct EffectiveLimits {
     pub registration_error_mm: f64,
     /// What the material can tolerate, from `physical.tolerance_registration_mm`.
     pub registration_budget_mm: f64,
+    /// Minimum peel angle from the material datasheet, in degrees.
+    pub peel_angle_min_deg: f64,
+    /// Declared peel rate. Free text: a new material may use a value this build
+    /// has never heard of, and rejecting it would be worse than flagging it.
+    pub peel_rate: String,
 }
 
 /// Material plus plotter plus the limits they jointly imply.
@@ -153,6 +158,8 @@ impl CuttingProfile {
                 kerf_mm: b.kerf_mm,
                 registration_error_mm: plotter.accuracy.max_registration_error_mm,
                 registration_budget_mm: material.physical.tolerance_registration_mm,
+                peel_angle_min_deg: material.physical.peel_angle_min_deg,
+                peel_rate: material.physical.peel_rate.clone(),
             },
             derivation,
         }
@@ -293,6 +300,15 @@ impl RuleSet {
                 threshold: "line_width_mm".into(),
                 headline: "{n} островков не соединены с маской.".into(),
                 reason: "При снятии маски островок выпадет и повредит деталь.".into(),
+            },
+            Rule {
+                code: "peelability".into(),
+                severity: Severity::Warning,
+                measure: Measure::MinGap,
+                auto_fixable: false,
+                threshold: "line_width_mm".into(),
+                headline: "Снятие не смоделировано.".into(),
+                reason: "Проверяется косвенно: через минимальную ширину и площадь островков.".into(),
             },
             Rule {
                 code: "corner_radius".into(),

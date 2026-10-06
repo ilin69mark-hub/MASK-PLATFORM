@@ -150,6 +150,19 @@ impl MaterialProfile {
         if self.physical.tolerance_registration_mm < 0.0 {
             return Err(reason("registration tolerance must be non-negative"));
         }
+        // Declared, read by nothing, and never checked — until now. A peel angle
+        // outside this range cannot be a real peel angle, and a profile carrying
+        // one would quietly disable any future check on T-11.
+        if self.physical.peel_angle_min_deg <= 0.0 || self.physical.peel_angle_min_deg >= 180.0 {
+            return Err(reason(
+                "peel angle must be strictly between 0 and 180 degrees",
+            ));
+        }
+        if self.physical.peel_rate.trim().is_empty() {
+            return Err(reason(
+                "peel rate must be declared, even if only as unknown",
+            ));
+        }
         Ok(())
     }
 
@@ -329,6 +342,36 @@ mod tests {
             status: ProfileStatus::Active,
             verified_physical: true,
         }
+    }
+
+    #[test]
+    fn peel_parameters_are_validated_not_just_carried() {
+        let mut p = material();
+        p.physical.peel_angle_min_deg = 0.0;
+        assert!(
+            p.validate().is_err(),
+            "a zero peel angle is not a peel angle"
+        );
+
+        p.physical.peel_angle_min_deg = 180.0;
+        assert!(p.validate().is_err(), "180 degrees means no peel at all");
+
+        p.physical.peel_angle_min_deg = 120.0;
+        p.physical.peel_rate = "   ".to_string();
+        assert!(
+            p.validate().is_err(),
+            "an empty peel rate leaves nothing to interpret"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_peel_rate_is_allowed_but_must_be_present() {
+        // A new material must not be rejected just because this build has not
+        // heard of its peel rate. What matters is that the field is filled in, and
+        // the validator warns that the value cannot be read.
+        let mut p = material();
+        p.physical.peel_rate = "unheard_of".to_string();
+        assert!(p.validate().is_ok());
     }
 
     #[test]
