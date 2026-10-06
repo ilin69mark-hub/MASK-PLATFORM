@@ -490,11 +490,16 @@ fn dedupe(points: Vec<Point>, tolerance_mm: f64) -> Vec<Point> {
 }
 
 /// Deliberate omissions, kept greppable.
+///
+/// Updated 2026-10-06. The second sentence claimed the radius was unmeasurable until
+/// curves existed. Curves exist — `Contour.arcs` since 52b2533 — and T-05 measures
+/// them (`min_corner_radius`, ADR-0015). What is left is narrower and worth stating
+/// precisely rather than leaving a sentence that reads as "not done yet".
 pub const KNOWN_GAPS: &str = "\
-this is the polygonal proxy for T-05, not the radius measurement T-05 asks \
-for; radius stays unmeasurable until curves exist in the geometry spine. \
-Rounding refines the blade corner but does not model blade offset dragging on \
-an inside turn, which needs the tool's swept path.";
+T-05 measures the radius of a declared arc, not the radius of a corner: a polygonal \
+vertex has no radius, so a contour with no arcs is still exempt. Rounding refines \
+the blade corner but does not model blade offset dragging on an inside turn, which \
+needs the tool's swept path.";
 
 #[cfg(test)]
 mod tests {
@@ -899,6 +904,12 @@ mod tests {
     #[test]
     fn the_known_gap_is_stated_rather_than_left_to_be_discovered() {
         assert!(KNOWN_GAPS.contains("T-05"));
-        assert!(KNOWN_GAPS.contains("curves"));
+        // The old text said the radius was unmeasurable until curves existed. That was
+        // true once and is not now, and a stale gap reads as "not done yet" — which is
+        // how it survived. Pinned so the next reader has to update this with it.
+        assert!(
+            !KNOWN_GAPS.contains("unmeasurable until curves exist"),
+            "T-05 measures arcs now; the gap must say what is actually missing"
+        );
     }
 }
