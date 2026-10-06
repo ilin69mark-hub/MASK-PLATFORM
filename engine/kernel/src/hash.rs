@@ -13,7 +13,12 @@ use sha2::{Digest, Sha256};
 ///
 /// Bumping this invalidates every cached metric and every stored hash. It must
 /// change whenever the canonical form or the JSON encoding changes.
-pub const HASH_SCHEME_VERSION: u32 = 1;
+///
+/// Version 2 added the `C` command for arcs. Polygonal geometry hashes
+/// byte-identically to version 1, because nothing about a polygon's canonical
+/// form changed; a contour with curves hashes differently, and had to — it used to
+/// hash the same as the polygon through the same points.
+pub const HASH_SCHEME_VERSION: u32 = 2;
 
 /// A hash plus the scheme that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +197,169 @@ mod tests {
         assert_eq!(ContentHash::of(&shapes).digest.len(), 64);
     }
 
+    /// A circle as four points and four quarter arcs.
+    fn circle(radius: f64) -> crate::geom::Contour {
+        use crate::geom::{ArcSegment, Contour, Point};
+        let points: Vec<Point> = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (i as f64);
+                Point {
+                    x: radius * a.cos(),
+                    y: radius * a.sin(),
+                }
+            })
+            .collect();
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: Point { x: 0.0, y: 0.0 },
+                radius,
+                ccw: true,
+            })
+            .collect();
+        Contour {
+            points,
+            closed: true,
+            arcs,
+        }
+    }
+
+    #[test]
+    fn a_curve_and_its_chord_polygon_hash_differently() {
+        // The bug: both canonicalised to the same M/L/Z string, so two cuts with
+        // different areas and different perimeters shared one identity.
+        let curved = crate::geom::Shapes {
+            shapes: vec![crate::geom::Shape::new(circle(10.0))],
+        };
+        let straight = {
+            let c = circle(10.0);
+            crate::geom::Shapes {
+                shapes: vec![crate::geom::Shape::new(crate::geom::Contour {
+                    points: c.points,
+                    closed: true,
+                    arcs: Vec::new(),
+                })],
+            }
+        };
+        let a = ContentHash::of(&curved);
+        let b = ContentHash::of(&straight);
+        assert_ne!(
+            a.digest, b.digest,
+            "a circle and its inscribed square are not the same geometry"
+        );
+        assert_eq!(a.scheme, HASH_SCHEME_VERSION);
+    }
+
+    #[test]
+    fn equivalent_spellings_of_the_same_curve_hash_the_same() {
+        // The Validation section of ADR-0004 asks for this and it was never
+        // implemented: `M10,0C...` and `M 10 0 C ...` must be one geometry, or the
+        // metrics cache and reproduction check both lie.
+        let curved = circle(10.0);
+        let a = crate::geom::Shapes {
+            shapes: vec![crate::geom::Shape::new(curved.clone())],
+        };
+        // Nudge the first point inside the quantisation grid: canonicalisation must
+        // absorb it exactly as it absorbs jitter on a polygon.
+        let nudged = crate::geom::Contour {
+            points: {
+                let mut pts = curved.points.clone();
+                pts[0].x += 1e-9;
+                pts
+            },
+            closed: true,
+            arcs: curved.arcs.clone(),
+        };
+        let b = crate::geom::Shapes {
+            shapes: vec![crate::geom::Shape::new(nudged)],
+        };
+        assert_eq!(
+            ContentHash::of(&a).digest,
+            ContentHash::of(&b).digest,
+            "sub-quantum jitter must not change the hash"
+        );
+    }
+
+    /// Switch the C locale, returning the name that actually took effect.
+    fn set_locale(name: &str) -> Option<String> {
+        // SAFETY: a single-threaded test process. The alternative is a global
+        // mutable C setting touched from tests, which is worse.
+        unsafe extern "C" {
+            #[link_name = "setlocale"]
+            fn setlocale(category: i32, locale: *const std::ffi::c_char) -> *mut std::ffi::c_char;
+        }
+        const LC_ALL: i32 = 6;
+        let c_string = std::ffi::CString::new(name).expect("locale name");
+        let applied = unsafe { setlocale(LC_ALL, c_string.as_ptr()) };
+        (!applied.is_null()).then(|| unsafe {
+            std::ffi::CStr::from_ptr(applied)
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    #[test]
+    fn the_hash_does_not_depend_on_the_locale() {
+        // Asked for by the Validation section of ADR-0004 and missing until now.
+        //
+        // What this can and cannot prove, stated plainly. On macOS no installed
+        // locale changes the C library's decimal separator: fr_FR, de_DE, ru_RU
+        // and nl_NL all keep `.`. So switching locale here proves the code path is
+        // unaffected by the setting, and cannot prove it is unaffected by a
+        // comma. The part that a comma would actually break — that the emitted
+        // numbers are formatted by hand rather than through the locale — is
+        // checked directly below, and that is the check that carries the weight.
+        let curved = crate::geom::Shapes {
+            shapes: vec![crate::geom::Shape::new(circle(10.0))],
+        };
+        let before = ContentHash::of(&curved).digest;
+
+        for name in ["fr_FR.UTF-8", "de_DE.UTF-8", "ru_RU.UTF-8"] {
+            if let Some(applied) = set_locale(name) {
+                assert_eq!(
+                    before,
+                    ContentHash::of(&curved).digest,
+                    "the hash changed under {applied}"
+                );
+            }
+        }
+        set_locale("C");
+    }
+
+    #[test]
+    fn every_number_in_the_canonical_path_is_written_in_ascii() {
+        // The load-bearing half of the locale requirement.
+        //
+        // Comma-separation of path arguments is legitimate — `C x1 y1, x2 y2, x y`
+        // is the SVG grammar — so a blanket "no commas" test proves nothing, and
+        // that is the trap a first attempt at this test fell into. What must hold is
+        // narrower and stronger: no character a locale could substitute may appear
+        // *inside* a number. Strip the command letters and the argument separators,
+        // and whatever is left has to be pure ASCII decimal.
+        let path = crate::to_path_data(&circle(10.0));
+        let mut numbers = String::new();
+        for c in path.chars() {
+            if c.is_ascii_alphabetic() || c == ',' || c.is_whitespace() {
+                continue;
+            }
+            numbers.push(c);
+        }
+        assert!(
+            numbers
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')),
+            "a number carries something a locale could have changed: {numbers}"
+        );
+
+        // And the whole text still has to survive a round trip through JSON, since
+        // that is how it reaches disk and the metrics cache.
+        let text = canonical_text(&crate::geom::Shapes {
+            shapes: vec![crate::geom::Shape::new(circle(10.0))],
+        });
+        serde_json::from_str::<serde_json::Value>(&text).expect("canonical text stays valid JSON");
+    }
+
     #[test]
     fn canonical_text_is_parseable_json() {
         // Guards the bug where path data was emitted bare and the result was
@@ -199,7 +367,7 @@ mod tests {
         let text = canonical_text(&rect(0.0, 0.0, 1.0, 1.0));
         let parsed: serde_json::Value =
             serde_json::from_str(&text).expect("canonical form must be valid JSON");
-        assert_eq!(parsed["h"], 1);
+        assert_eq!(parsed["h"], HASH_SCHEME_VERSION);
         assert_eq!(parsed["shapes"].as_array().map(Vec::len), Some(1));
         assert!(parsed["shapes"][0]["outer"].is_string());
     }

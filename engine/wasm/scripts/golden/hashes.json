@@ -1,5 +1,5 @@
 {
-  "band_0_42": "sha256:3b3dc2e508d739f31c7bda75925feec4e2d5305d81dedaa4408c6c78db8deeee",
+  "band_0_42": "sha256:158fddf9a9d010dedcd1cab7ec94071c1fd9ce0aa0795a4f714a56260b0c9baf",
   "band_0_42_shapes": {
     "shapes": [
       {
@@ -28,7 +28,7 @@
       }
     ]
   },
-  "band_0_80": "sha256:ce84c87ee5bb2af1abf7d790262ca7e98c23227ea0fdc055027ffdd37876a074",
+  "band_0_80": "sha256:82d492077cea4dc87ddb2a6030fa373c8ea83370c50dc27d13832daef8d0c48c",
   "band_0_80_shapes": {
     "shapes": [
       {
@@ -57,6 +57,7 @@
       }
     ]
   },
-  "square_10x5": "sha256:9d6992e6b434816065e4e1d40286cb277fb1a5d1dba4df20396c34e74a27b6ad",
-  "square_7x3": "sha256:81cefb2b83de4f5e1555abb57a341893a4a24ee7ca3da88a08d11926f6a92b95"
+  "hash_scheme": 2,
+  "square_10x5": "sha256:8006fe4fae86ded00e2bb56e114f480f8d5ff89434c0c2341cc006b457b63b55",
+  "square_7x3": "sha256:868306e18cddaaedc910ce0c6028d791b81b41d1c720e5c19c7061934efc8dec"
 }

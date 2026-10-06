@@ -214,6 +214,13 @@ async function main() {
   }
 
   check(
+    "the golden file belongs to the hash scheme the kernel is running",
+    golden.hash_scheme === wasm.hash_scheme(),
+    `golden was written for scheme ${golden.hash_scheme}, kernel is on ${wasm.hash_scheme()}. ` +
+      "Regenerate with: cargo run -p mask-kernel --example regen_golden"
+  );
+
+  check(
     "the browser hash matches the Rust hash for identical geometry",
     h1 === golden.square_10x5,
     `browser ${h1}, rust ${golden.square_10x5}`

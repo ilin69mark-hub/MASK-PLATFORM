@@ -221,6 +221,17 @@ pub fn union(a_json: &str, b_json: &str) -> Result<JsValue, JsValue> {
     to_js(&merged)
 }
 
+/// The hash scheme these digests belong to.
+///
+/// Exposed so the cross-runtime check can tell a stale golden file from a real
+/// disagreement. When the scheme moves, every digest moves with it, and the
+/// difference between "the browser is broken" and "the golden was never
+/// regenerated" is the difference between debugging the wrong thing.
+#[wasm_bindgen]
+pub fn hash_scheme() -> u32 {
+    mask_kernel::HASH_SCHEME_VERSION
+}
+
 /// Canonical content hash of a shape set, for change detection in the editor.
 #[wasm_bindgen]
 pub fn content_hash(shapes_json: &str) -> Result<String, JsValue> {

@@ -387,6 +387,7 @@ pub fn area_of(shape: &Shape) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mask_kernel::ContentHash;
     use mask_kernel::{Contour, Point};
     use mask_validate::Counts;
 
@@ -444,6 +445,86 @@ mod tests {
         assert!(svg.contains("<revision>4</revision>"));
         assert!(svg.contains("<layer>3</layer>"));
         assert!(svg.contains("<engine>0.1.0</engine>"));
+    }
+
+    /// The digest and the drawing have to come from the same string.
+    ///
+    /// A hash computed over a canonical form, and a file that draws something else,
+    /// would agree with themselves forever while describing two different cuts. This
+    /// is the test that fails if the two ever diverge — which is exactly what
+    /// happened while curves were being added: the digest read a chordal path and
+    /// the file drew the arc.
+    #[test]
+    fn the_hashed_path_is_the_path_the_file_draws() {
+        let curved = circle(20.0);
+        let chorded = Contour {
+            points: curved.points.clone(),
+            closed: true,
+            arcs: Vec::new(),
+        };
+        let svg = to_svg(
+            &Shapes {
+                shapes: vec![Shape::new(curved.clone()), Shape::new(chorded.clone())],
+            },
+            1,
+            "Base",
+            &passing_report(),
+            &ctx(),
+        );
+
+        let curve_d = mask_kernel::to_path_data(&curved);
+        let chord_d = mask_kernel::to_path_data(&chorded);
+        assert!(
+            svg.contains(&curve_d),
+            "the curved path is not what the file draws"
+        );
+        assert!(
+            svg.contains(&chord_d),
+            "the chorded path is not what the file draws"
+        );
+        assert_ne!(
+            curve_d, chord_d,
+            "these two geometries must not share one path string"
+        );
+        assert_ne!(
+            ContentHash::of(&Shapes {
+                shapes: vec![Shape::new(curved)]
+            })
+            .digest,
+            ContentHash::of(&Shapes {
+                shapes: vec![Shape::new(chorded)]
+            })
+            .digest,
+            "a circle and its inscribed square are not the same cut"
+        );
+    }
+
+    /// A circle of four quarter arcs, the geometry the curve work turned on.
+    fn circle(radius: f64) -> Contour {
+        use mask_kernel::geom::ArcSegment;
+        let points = (0..4)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (f64::from(i));
+                mask_kernel::geom::Point {
+                    x: radius * a.cos(),
+                    y: radius * a.sin(),
+                }
+            })
+            .collect();
+        let arcs = (0..4)
+            .map(|i| ArcSegment {
+                from: i,
+                to: (i + 1) % 4,
+                centre: mask_kernel::geom::Point { x: 0.0, y: 0.0 },
+                radius,
+                ccw: true,
+            })
+            .collect();
+        Contour {
+            points,
+            closed: true,
+            arcs,
+        }
     }
 
     #[test]
