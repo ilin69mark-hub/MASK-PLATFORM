@@ -53,11 +53,29 @@ pub struct JsShape {
 pub struct LayerResult {
     pub area_mm2: f64,
     pub min_width_mm: Option<f64>,
-    // No min_gap_mm: the gap between adjacent elements is not measured yet
-    // (Topology check T-02). An Option that is always None is dropped by serde and
-    // arrives in JavaScript as `undefined`, so shipping it would teach the UI to
-    // handle a case that never happens while hiding the fact that the check is
-    // missing. It is added when it is implemented.
+    /// Tightest gap between two regions, and which two.
+    ///
+    /// T-02. The note that used to stand here said this was missing until the check
+    /// was implemented, and then it stayed that way after it *was* implemented —
+    /// `gap.rs` has been here since the rule was closed, and the browser could not
+    /// see any of it. That is the worst state of all: the field was deliberately
+    /// withheld so its absence would be visible, and the absence stayed invisible.
+    ///
+    /// A user dragging one element toward another in the editor has no way to see
+    /// the gap closing, and the validator's `min_gap` error then arrives at
+    /// submission describing something the editor let them do.
+    pub min_gap: Option<GapReport>,
+    /// Regions that cross themselves, with the crossing point named.
+    ///
+    /// The CLI refuses such geometry before any merge touches it, because union
+    /// resolves a self-intersection silently: a bow tie goes in as one contour
+    /// reporting 0 mm² and comes out as two triangles, and nothing is reported.
+    /// The editor had no such gate, so a vertex dragged into a bow tie showed a
+    /// plausible area on screen and was only rejected on the way to the server.
+    ///
+    /// Reported rather than repaired, for the reason `integrity.rs` gives: resolving
+    /// it changes the figure, and a mask is a physical object cut out of film.
+    pub self_intersections: Vec<Crossing>,
     pub island_count: usize,
     pub hole_count: usize,
     pub bbox: [f64; 4],
@@ -76,6 +94,31 @@ pub struct ValidationResult {
     /// Headline text per violation, ready to display.
     pub messages: Vec<String>,
     pub limits_physically_verified: bool,
+}
+
+/// The tightest gap in a layer, and the pair of regions it sits between.
+///
+/// `mm` is zero when the regions touch or overlap, which is the case that matters:
+/// they are one physical piece, and there is no film left between them to hold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapReport {
+    /// Index of the first region.
+    pub a: usize,
+    /// Index of the second region.
+    pub b: usize,
+    pub mm: f64,
+}
+
+/// One point where a contour crosses itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Crossing {
+    /// Index of the shape.
+    pub shape: usize,
+    /// Index of the contour: 0 is the outer contour, 1.. are holes.
+    pub contour: usize,
+    /// Segment index within the contour, counting the closing segment last.
+    pub segment: usize,
+    pub at: [f64; 2],
 }
 
 /// An error that is safe to show a user.
@@ -159,6 +202,26 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
         .filter_map(|s| mask_kernel::min_width(&Shapes::single(s.clone())))
         .reduce(f64::min);
 
+    // T-02. Absent rather than zero for a single region: one piece of film has no
+    // neighbour, and a gap against nothing would be a number invented rather than
+    // measured.
+    let min_gap = mask_kernel::min_gap(&shapes).map(|g| GapReport {
+        a: g.a,
+        b: g.b,
+        mm: g.mm,
+    });
+
+    // Reported, not repaired — see the field's doc comment.
+    let self_intersections = mask_kernel::self_intersections(&shapes)
+        .into_iter()
+        .map(|c| Crossing {
+            shape: c.shape,
+            contour: c.contour,
+            segment: c.segment,
+            at: [c.at.x, c.at.y],
+        })
+        .collect();
+
     let path_data: Vec<String> = shapes
         .shapes
         .iter()
@@ -169,6 +232,8 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
     Ok(LayerResult {
         area_mm2: measure::shapes_area(&shapes),
         min_width_mm,
+        min_gap,
+        self_intersections,
         island_count: shapes.shapes.len(),
         hole_count: shapes.shapes.iter().map(|s| s.holes.len()).sum(),
         bbox: [0.0, 0.0, w, h],
@@ -434,6 +499,68 @@ mod tests {
         assert!((result.area_mm2 - 50.0).abs() < 1e-9);
         assert!((result.min_width_mm.expect("width") - 5.0).abs() < 1e-3);
         assert_eq!(result.island_count, 1);
+    }
+
+    #[test]
+    fn the_gap_between_two_regions_reaches_the_editor() {
+        // Two squares 3 mm apart measured between their facing edges. The gap is
+        // checked in both axes, because a diagonal-only implementation understates
+        // it and that error is invisible in the axis-aligned case.
+        let two = serde_json::json!({
+            "shapes": [
+                { "outer": { "points": [[0.0,0.0],[5.0,0.0],[5.0,5.0],[0.0,5.0]], "closed": true },
+                  "holes": [] },
+                { "outer": { "points": [[8.0,0.0],[13.0,0.0],[13.0,5.0],[8.0,5.0]], "closed": true },
+                  "holes": [] }
+            ]
+        })
+        .to_string();
+
+        let result = measure_layer_inner(&two).expect("measure");
+        let gap = result.min_gap.expect("two regions have a gap");
+        assert!((gap.mm - 3.0).abs() < 1e-6, "got {}", gap.mm);
+        assert_eq!((gap.a, gap.b), (0, 1));
+    }
+
+    #[test]
+    fn a_single_region_reports_no_gap_rather_than_a_measured_zero() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        assert!(
+            result.min_gap.is_none(),
+            "one region has no neighbour; a number here would be invented"
+        );
+    }
+
+    #[test]
+    fn a_bow_tie_is_reported_rather_than_measured_as_zero_area() {
+        // The failure the CLI's integrity gate exists to stop. The signed rule
+        // cancels two lobes of 50 mm² each and reports 0 mm², which looks like a
+        // measurement rather than an error.
+        let bow_tie = serde_json::json!({
+            "shapes": [{
+                "outer": {
+                    "points": [[0.0,0.0],[10.0,10.0],[10.0,0.0],[0.0,10.0]],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string();
+
+        let result = measure_layer_inner(&bow_tie).expect("measure");
+        assert!(
+            !result.self_intersections.is_empty(),
+            "a contour crossing itself must be named, not measured"
+        );
+        // Named precisely, so the editor can point at the crossing.
+        let first = &result.self_intersections[0];
+        assert!((first.at[0] - 5.0).abs() < 1e-9 && (first.at[1] - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ordinary_geometry_reports_no_crossings() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        assert!(result.self_intersections.is_empty());
     }
 
     #[test]

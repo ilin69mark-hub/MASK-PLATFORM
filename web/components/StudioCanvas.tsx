@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type Crossing,
   type LayerResult,
   type Shapes,
   loadKernel,
@@ -41,6 +42,8 @@ export interface StudioProps {
   revision: number;
   /** Minimum element width for the profile, shown as a threshold line. */
   minWidthMm: number;
+  /** Minimum gap between two elements (T-02), from the same profile. */
+  minGapMm: number;
 }
 
 interface Measurement {
@@ -58,6 +61,7 @@ export function StudioCanvas({
   projectId,
   revision,
   minWidthMm,
+  minGapMm,
 }: StudioProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [mode, setMode] = useState<ViewMode>("mask");
@@ -196,11 +200,16 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
         </svg>
       </div>
 
+      {measurement.status === "ready" && measurement.result && (
+        <CrossingWarning crossings={measurement.result.self_intersections} />
+      )}
+
       <footer className="studio-status">
         <StatusBar
           measurement={measurement}
           kernelReady={kernelReady}
           minWidthMm={minWidthMm}
+          minGapMm={minGapMm}
           onDownload={handleDownload}
         />
       </footer>
@@ -252,15 +261,50 @@ function ThresholdLine({
   );
 }
 
+/**
+ * The geometry is not what it appears to be.
+ *
+ * A contour that crosses itself has its lobes cancel in the signed area rule, so a
+ * bow tie measures 0 mm² — a number, not an error. The CLI refuses such geometry
+ * before any merge touches it; without this the editor showed a plausible area for
+ * a shape the server would reject, and the user found out only at submission.
+ *
+ * Reported, never repaired: resolving the crossing reshapes the figure, and a mask
+ * is a physical object cut out of film.
+ */
+function CrossingWarning({ crossings }: { crossings: Crossing[] }) {
+  // The length is checked first, so `first` is present — but TypeScript cannot
+  // see that through `length`, hence the assertion rather than a cast.
+  const first = crossings[0];
+  if (!first) return null;
+  const contour =
+    first.contour === 0 ? "внешний контур" : `дыра ${first.contour}`;
+  return (
+    <div className="studio-warn" role="alert" data-testid="crossing-warning">
+      <strong>
+        Контур пересекает сам себя{" "}
+        {crossings.length === 1 ? "в одной точке" : `в ${crossings.length} точках`}.
+      </strong>{" "}
+      Первая — ({first.at[0].toFixed(3)}; {first.at[1].toFixed(3)}) мм, элемент{" "}
+      {first.shape + 1}, {contour}. Площадь такой фигуры по знаковому правилу
+      неверна: lobes взаимно сокращаются, и число выглядит как измерение, а не
+      как ошибка. Объединение разрешит пересечение молча, поэтому вырежется не та
+      фигура, что нарисована.
+    </div>
+  );
+}
+
 function StatusBar({
   measurement,
   kernelReady,
   minWidthMm,
+  minGapMm,
   onDownload,
 }: {
   measurement: Measurement;
   kernelReady: boolean;
   minWidthMm: number;
+  minGapMm: number;
   onDownload: () => void;
 }) {
   if (!kernelReady) {
@@ -282,7 +326,12 @@ function StatusBar({
   // Compared with the same 1e-3 band the kernel uses (ADR-0004). Without it a
   // layer sitting exactly on the limit would flicker between pass and fail.
   const tooNarrow =
-    r.min_width_mm != null && r.min_width_mm < minWidthMm - MIN_WIDTH_EPS_MM;
+    r.min_width_mm !== undefined && r.min_width_mm < minWidthMm - MIN_WIDTH_EPS_MM;
+  // The same band for the gap (T-02). Two elements 0.900 mm apart with a 0.900 mm
+  // minimum is manufacturable, and reporting it otherwise would train the user to
+  // ignore this line.
+  const tooClose =
+    r.min_gap !== undefined && r.min_gap.mm < minGapMm - MIN_WIDTH_EPS_MM;
 
   return (
     <div className="status-row">
@@ -301,12 +350,26 @@ function StatusBar({
           data-testid="min-width"
           className={tooNarrow ? "error" : undefined}
         >
-          {r.min_width_mm == null ? "—" : `${r.min_width_mm.toFixed(3)} мм`}
+          {r.min_width_mm === undefined ? "—" : `${r.min_width_mm.toFixed(3)} мм`}
         </strong>
         {tooNarrow && (
           <span className="error">
             {" "}
             ниже минимума {minWidthMm.toFixed(3)} мм
+          </span>
+        )}
+      </span>
+      <span>
+        мин. зазор:{" "}
+        <strong data-testid="min-gap" className={tooClose ? "error" : undefined}>
+          {/* Undefined for one region: there is no neighbour to be close to, and
+              printing 0.000 mm there would state that a gap was measured. */}
+          {r.min_gap === undefined ? "—" : `${r.min_gap.mm.toFixed(3)} мм`}
+        </strong>
+        {tooClose && (
+          <span className="error">
+            {" "}
+            ниже минимума {minGapMm.toFixed(3)} мм
           </span>
         )}
       </span>

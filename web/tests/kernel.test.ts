@@ -88,6 +88,50 @@ test("measuring a square returns its area and narrowest element", async () => {
   assert.equal(m.hole_count, 0);
 });
 
+test("the gap between two regions reaches the editor", async () => {
+  // T-02. The facade had no way to see this at all, so a user dragging one
+  // element toward another got no feedback until submission.
+  await boot();
+  const two = toShapes(
+    shapeOf(rect(0, 0, 5, 5)),
+    shapeOf(rect(8, 0, 5, 5))
+  );
+  const r = measure(two);
+  assert.ok(r.min_gap, "two regions must report a gap");
+  assert.ok(Math.abs(r.min_gap.mm - 3) < 1e-6, `got ${r.min_gap.mm}`);
+  assert.deepEqual([r.min_gap.a, r.min_gap.b], [0, 1]);
+});
+
+test("a single region reports no gap rather than a zero", async () => {
+  // A gap against nothing would be a number invented, not measured. The absence
+  // arrives as `undefined`, not `null`, so the facade must be checked against what
+  // actually crosses the boundary.
+  await boot();
+  const r = measure(square);
+  assert.equal(r.min_gap, undefined);
+  assert.notEqual(r.min_gap, null);
+});
+
+test("a contour crossing itself is named, not measured", async () => {
+  // The failure the CLI's integrity gate exists to stop. Signed area cancels two
+  // equal lobes and reports 0 mm², which reads as a measurement rather than an
+  // error, and the editor used to show exactly that.
+  await boot();
+  const bowTie = toShapes({
+    outer: { points: [[0, 0], [10, 10], [10, 0], [0, 10]], closed: true },
+    holes: [],
+  });
+  const r = measure(bowTie);
+  assert.ok(r.self_intersections.length > 0, "the crossing must be reported");
+  const [x, y] = r.self_intersections[0]!.at;
+  assert.ok(Math.abs(x - 5) < 1e-9 && Math.abs(y - 5) < 1e-9, `got ${x},${y}`);
+});
+
+test("ordinary geometry reports no crossings", async () => {
+  await boot();
+  assert.deepEqual(measure(square).self_intersections, []);
+});
+
 test("path data comes back canonical", async () => {
   await boot();
   const m = measure(square);

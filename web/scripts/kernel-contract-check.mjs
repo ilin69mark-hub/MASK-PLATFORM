@@ -28,9 +28,15 @@ function check(name, condition, detail = "") {
 }
 
 /** The facade's shape for a measurement, transcribed from web/lib/kernel.ts. */
+// An absent Rust `Option` crosses the boundary as `undefined`, so a nullable
+// field is listed as "…|undefined" rather than "…|null". Getting this wrong is
+// exactly the bug this script exists to catch: TypeScript believes the facade
+// either way.
 const FACADE_LAYER_RESULT = {
   area_mm2: "number",
-  min_width_mm: "number|null",
+  min_width_mm: "number|undefined",
+  min_gap: "object|undefined",
+  self_intersections: "array",
   island_count: "number",
   hole_count: "number",
   bbox: "array",
@@ -149,12 +155,14 @@ async function main() {
     ],
   });
   const measured = wasm.measure_layer(square);
+  // A single square: one region, so the nullable fields must actually be absent.
+  // Measuring a two-region layer instead would let a facade that always got a
+  // value pass a check about what happens when there is none.
   for (const [key, expected] of Object.entries(FACADE_LAYER_RESULT)) {
+    const allowed = expected.split("|");
     check(
       `measure_layer.${key} matches ${expected}`,
-      typeOf(measured[key]) === expected.replace("|", "") ||
-        (expected.includes("|") &&
-          (measured[key] === null || typeOf(measured[key]) === "number")),
+      allowed.includes(typeOf(measured[key])),
       `got ${typeOf(measured[key])} (${measured[key]})`
     );
   }

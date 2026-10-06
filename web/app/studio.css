@@ -1,0 +1,121 @@
+/*
+ * Studio styles.
+ *
+ * These class names existed in the components from the first commit with nothing
+ * behind them: the canvas rendered, every `className="error"` did nothing, and the
+ * colour coding MASK_STUDIO.md §5.2 promises — green, yellow, red by risk — was
+ * documented and unimplemented. The classes were read as styling and were not.
+ *
+ * Kept in one plain stylesheet with no framework. There are ten class names; a
+ * dependency would cost more than it explains.
+ */
+
+.studio {
+  font-family: system-ui, sans-serif;
+  color: #111;
+  padding: 0 1.5rem 1.5rem;
+}
+
+.studio-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.studio-header h1 {
+  font-size: 1rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.studio-header .rev {
+  color: #666;
+  font-weight: 400;
+}
+
+.modes {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.modes button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.modes button[aria-pressed="true"] {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.studio-canvas {
+  margin: 1rem 0;
+}
+
+.studio-canvas svg {
+  width: 100%;
+  height: auto;
+  max-height: 70vh;
+  touch-action: none;
+}
+
+/* The warning is the one thing on this page that invalidates the geometry the
+ * user is looking at, so it is given a fill rather than just a border. */
+.studio-warn {
+  background: #fdecea;
+  border: 1px solid #c41820;
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #5c0f13;
+}
+
+.studio-status {
+  border-top: 1px solid #e5e5e5;
+  padding-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.status-row button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.muted {
+  color: #777;
+}
+
+/* Red on the number itself, not only in the message beside it, so a value that
+ * fails is recognisable while scanning the row rather than only when read. */
+.error {
+  color: #c41820;
+  font-weight: 600;
+}
+
+.threshold line {
+  vector-effect: non-scaling-stroke;
+}

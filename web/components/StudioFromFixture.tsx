@@ -36,6 +36,8 @@ export interface StudioFromFixtureProps {
   materialJson: string;
   plotterJson: string;
   minWidthMm: number;
+  /** Minimum gap between two elements (T-02), from the same profile. */
+  minGapMm: number;
 }
 
 /** Parse the kernel's canonical path data back into a contour. */
@@ -66,6 +68,7 @@ export function StudioFromFixture({
   materialJson,
   plotterJson,
   minWidthMm,
+  minGapMm,
 }: StudioFromFixtureProps) {
   const [ready, setReady] = useState(false);
   const [shapesByLayer, setShapesByLayer] = useState<Shapes[]>([]);
@@ -154,6 +157,7 @@ export function StudioFromFixture({
           projectId={projectId}
           revision={revision}
           minWidthMm={minWidthMm}
+          minGapMm={minGapMm}
         />
       )}
     </div>

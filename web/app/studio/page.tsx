@@ -46,7 +46,7 @@ export default async function StudioPage() {
   const material = JSON.parse(materialJson) as {
     code: string;
     version: number;
-    minimums: { line_width_mm: number };
+    minimums: { line_width_mm: number; gap_mm: number };
     status: string;
   };
 
@@ -66,6 +66,7 @@ export default async function StudioPage() {
         materialJson={materialJson}
         plotterJson={plotterJson}
         minWidthMm={material.minimums.line_width_mm}
+        minGapMm={material.minimums.gap_mm}
       />
 
       <section style={{ padding: "0 1.5rem 2rem", maxWidth: "52rem", color: "#444" }}>

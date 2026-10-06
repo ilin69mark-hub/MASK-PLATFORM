@@ -27,9 +27,40 @@ export interface Shapes {
   shapes: Shape[];
 }
 
+export interface GapReport {
+  /** Index of the first region. */
+  a: number;
+  /** Index of the second region. */
+  b: number;
+  /** Distance in millimetres. Zero when the regions touch or overlap. */
+  mm: number;
+}
+
+export interface Crossing {
+  shape: number;
+  /** 0 is the outer contour, 1.. are holes. */
+  contour: number;
+  segment: number;
+  at: [number, number];
+}
+
 export interface LayerResult {
   area_mm2: number;
-  min_width_mm: number | null;
+  /**
+   * T-02. Undefined for a single region: it has no neighbour, so a number here
+   * would be invented rather than measured.
+   *
+   * `undefined` and not `null`, because that is what arrives. An absent Rust
+   * `Option` crosses the boundary as `undefined`, so a facade promising `null`
+   * would type-check against a value that never occurs — and would quietly
+   * invite `=== null`, which is false for `undefined`, into code that decides
+   * whether a rule passed.
+   */
+  min_width_mm: number | undefined;
+  /** T-02. See `min_width_mm` on why absence rather than null. */
+  min_gap: GapReport | undefined;
+  /** T-08. Non-empty means the geometry is not what it appears to be. */
+  self_intersections: Crossing[];
   /** Absent rather than null: see the note in the Rust struct. */
   island_count: number;
   hole_count: number;

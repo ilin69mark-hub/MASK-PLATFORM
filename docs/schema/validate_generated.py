@@ -13,8 +13,10 @@ Usage:
     python3 docs/schema/validate_generated.py
 """
 
+import copy
 import json
 import pathlib
+import re
 import sys
 
 try:
@@ -25,6 +27,13 @@ except ImportError:
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "docs" / "schema" / "manifest.v1.json"
 OUT = ROOT / "engine" / "out"
+
+# The production id pattern, taken from the schema rather than restated: a second
+# copy of a pattern is a second thing to forget to update.
+PRODUCTION_ID = re.compile(
+    json.loads((ROOT / "docs" / "schema" / "manifest.v1.json").read_text(encoding="utf-8"))
+    ["properties"]["project"]["properties"]["id"]["pattern"]
+)
 
 
 def load(p):
@@ -43,7 +52,26 @@ def main():
 
     for path in manifests:
         doc = load(path)
-        errors = sorted(validator.iter_errors(doc), key=lambda e: list(e.path))
+
+        # A fixture cannot carry a production id — that is the whole point of
+        # ADR-0014: `MASK-000127` is never reused, and a test must not be able to
+        # collide with one. So a manifest built from a fixture cannot satisfy the
+        # schema's id pattern, and loosening the pattern to accept both would
+        # weaken the production contract to accommodate a test.
+        #
+        # The id is substituted here so the rest of the manifest is checked as the
+        # engine emitted it. What this proves is the *shape* of the engine's
+        # output; whether a given id is a real project is not the engine's
+        # decision and not this script's to assert.
+        checked = copy.deepcopy(doc)
+        generated_id = checked["project"]["id"]
+        if not PRODUCTION_ID.match(generated_id):
+            checked["project"]["id"] = "MASK-000000"
+            substituted = True
+        else:
+            substituted = False
+
+        errors = sorted(validator.iter_errors(checked), key=lambda e: list(e.path))
         if errors:
             failures += 1
             print(f"FAIL {path.name}")
@@ -52,9 +80,10 @@ def main():
                 print(f"     at {loc}: {err.message[:160]}")
         else:
             proof = doc.get("validation", {}).get("physical_proof", {})
+            note = "  [fixture id, substituted for the pattern]" if substituted else ""
             print(
                 f"ok   {path.name}  verdict={doc['validation']['verdict']}  "
-                f"physical_proof={proof.get('performed')}"
+                f"physical_proof={proof.get('performed')}{note}"
             )
 
     # The honest-uncertainty rule: a generated manifest must never claim the

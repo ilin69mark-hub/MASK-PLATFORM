@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import "./studio.css";
+
 export const metadata: Metadata = {
   title: "MASK PLATFORM",
   description: "Production of multilayer physical masks for airbrushing.",
