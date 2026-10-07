@@ -17,36 +17,14 @@
 //! The browser may *evaluate* a project. It may not *approve* one: the verdict it
 //! returns is advisory, and only the server writes an approval.
 
+use mask_kernel::bridge::{bridge_unanchored, BridgeLimits};
 use mask_kernel::geom::{Point, Shapes};
 use mask_kernel::{measure, ContentHash};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
-use mask_validate::{validate_with_nesting, LayerInput, Rect4, Verdict};
+use mask_validate::{validate_with_nesting, BridgeRecord, LayerInput, Rect4, Verdict};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-
-/// Grid baked into this build, mirrored from ADR-0004's `CANON_QUANTUM_MM`.
-///
-/// Mirrored on purpose rather than re-exported: this is the value JavaScript is
-/// told, and a test asserts it equals the kernel's. If the two ever drift, every
-/// hash produced in the browser differs from the server and the metrics cache
-/// silently stops working.
-const CANON_QUANTUM_MM: f64 = 1e-4;
-
-/// A contour as it arrives from JavaScript.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct JsContour {
-    pub points: Vec<[f64; 2]>,
-    pub closed: bool,
-}
-
-/// A shape as it arrives from JavaScript: an outer contour plus holes.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct JsShape {
-    pub outer: JsContour,
-    #[serde(default)]
-    pub holes: Vec<JsContour>,
-}
 
 /// What JavaScript gets back about a layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,31 +119,52 @@ impl From<JsError> for wasm_bindgen::JsValue {
     }
 }
 
-/// Validate a project the way the server would.
+/// Validate a browser evaluation bundle containing inline layer geometry.
 ///
-/// Input is the same Mask Project JSON the server reads, so the editor cannot
-/// accidentally validate something the server would treat as a different
-/// document.
+/// This is not a `mask-project.v1.json` document. The production Mask Project
+/// deliberately stores only coordinate-frame metadata and references vector
+/// geometry through `geometry_id` (ADR-0016). Its layers cannot be checked until
+/// their external geometry records are resolved, and no resolver exists while the
+/// service layer is deferred. The browser therefore validates a self-contained
+/// evaluation bundle: project-like metadata plus the required inline `geometry`
+/// needed to perform the check. Retaining the project shape keeps field handling
+/// and verdict semantics consistent without claiming that a production document
+/// was validated.
 #[wasm_bindgen]
 pub fn validate_project(
     project_json: &str,
     material_json: &str,
     plotter_json: &str,
 ) -> Result<JsValue, JsValue> {
-    let material: MaterialProfile = parse(material_json, "material profile").map_err(into_js)?;
-    let plotter: PlotterProfile = parse(plotter_json, "plotter profile").map_err(into_js)?;
-    let value: serde_json::Value = parse(project_json, "project").map_err(into_js)?;
+    to_js(&validate_project_inner(project_json, material_json, plotter_json).map_err(into_js)?)
+}
+
+/// Typed project validation, callable from Rust tests.
+///
+/// The split exists so a claim about which checks reach the browser can be
+/// proved on the host instead of asserted. Both the crossings check (T-12) and
+/// the registration check (T-15) live inside `validate_with_registration`, which
+/// `validate_with_nesting` calls — so whether they reach the editor is a
+/// question about the *inputs* this function builds, and that is testable.
+fn validate_project_inner(
+    project_json: &str,
+    material_json: &str,
+    plotter_json: &str,
+) -> Result<ValidationResult, JsError> {
+    let material: MaterialProfile = parse(material_json, "material profile")?;
+    let plotter: PlotterProfile = parse(plotter_json, "plotter profile")?;
+    let value: serde_json::Value = parse(project_json, "project")?;
 
     let cutting = CuttingProfile::derive(&material, &plotter);
     let rules = RuleSet::from_profile(&cutting);
     let verified = cutting.is_physically_verified(&material, &plotter);
 
-    let layers = extract_layers(&value).map_err(into_js)?;
+    let layers = extract_layers(&value)?;
     let tiles = extract_tiles(&value);
 
     let report = validate_with_nesting(&layers, &cutting, &rules, verified, &tiles);
 
-    let result = ValidationResult {
+    Ok(ValidationResult {
         verdict: verdict_name(report.verdict).to_string(),
         error_count: report.counts.error,
         warning_count: report.counts.warning,
@@ -176,9 +175,7 @@ pub fn validate_project(
             .map(|v| v.headline.clone())
             .collect(),
         limits_physically_verified: report.limits_physically_verified,
-    };
-
-    to_js(&result)
+    })
 }
 
 /// Measure one layer and return its geometry ready for drawing.
@@ -286,6 +283,78 @@ pub fn union(a_json: &str, b_json: &str) -> Result<JsValue, JsValue> {
     to_js(&merged)
 }
 
+/// The result of an auto-fix pass: repaired geometry plus what was done to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairResult {
+    /// Geometry with the tabs merged in, ready to draw and to re-validate.
+    pub shapes: Shapes,
+    /// The tabs that were added, in the form the validator checks.
+    ///
+    /// Returned as records rather than kept on the host, because the identity of
+    /// a tab exists only here: merged into the geometry it is indistinguishable
+    /// from any other neck, and T-06/T-07 have nothing to measure unless the tab
+    /// says what it is.
+    pub bridges: Vec<BridgeRecord>,
+}
+
+/// Add tabs to every island that is not attached to the surrounding film.
+///
+/// This is the browser half of `maskctl --bridge`. Without it the editor cannot
+/// repair a layer, and without its records the validator cannot check the tabs:
+/// a document could then *claim* a bridge as a number, and T-07 would validate a
+/// claim rather than a geometry.
+///
+/// The limits are arguments rather than profile lookups because the caller owns
+/// the material: passing the profile's own `bridge_width_mm` and
+/// `minimums.bridge_length_mm` is what keeps the editor and the station cutting
+/// the same neck. Pass a *larger* `max_length_mm` and T-07 will then report the
+/// tab against the material — which is the check doing its job, not a failure of
+/// the repair.
+#[wasm_bindgen]
+pub fn bridge_unanchored_islands(
+    shapes_json: &str,
+    width_mm: f64,
+    max_length_mm: f64,
+) -> Result<JsValue, JsValue> {
+    to_js(&bridge_inner(shapes_json, width_mm, max_length_mm).map_err(into_js)?)
+}
+
+/// Typed bridging, callable from Rust tests.
+///
+/// All-or-nothing, exactly like the CLI: an island that cannot be reached leaves
+/// the layer as it was, with the reason in the error. Keeping that behaviour
+/// identical in both runtimes is the point of ADR-0013 — an editor that placed
+/// some tabs and the station that placed none would disagree about the same file.
+fn bridge_inner(
+    shapes_json: &str,
+    width_mm: f64,
+    max_length_mm: f64,
+) -> Result<RepairResult, JsError> {
+    let shapes: Shapes = parse(shapes_json, "shapes")?;
+    shapes
+        .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| JsError::new(e.to_string()))?;
+
+    let limits = BridgeLimits {
+        width_mm,
+        max_length_mm,
+    };
+    let (repaired, bridges) =
+        bridge_unanchored(&shapes, limits).map_err(|e| JsError::new(e.to_string()))?;
+
+    Ok(RepairResult {
+        shapes: repaired,
+        bridges: bridges
+            .iter()
+            .map(|b| BridgeRecord {
+                width_mm: b.width_mm,
+                length_mm: b.length_mm,
+                at: b.to,
+            })
+            .collect(),
+    })
+}
+
 /// The hash scheme these digests belong to.
 ///
 /// Exposed so the cross-runtime check can tell a stale golden file from a real
@@ -323,7 +392,7 @@ pub fn effective_limits(material_json: &str, plotter_json: &str) -> Result<JsVal
 #[wasm_bindgen]
 pub fn engine_constants() -> JsValue {
     let value = serde_json::json!({
-        "canon_quantum_mm": CANON_QUANTUM_MM,
+        "canon_quantum_mm": mask_kernel::CANON_QUANTUM_MM,
         "coord_dp": mask_kernel::CANON_COORD_DP,
         "measure_report_dp": mask_kernel::MEASURE_REPORT_DP,
         "min_width_eps_mm": mask_kernel::MIN_WIDTH_EPS_MM,
@@ -446,15 +515,50 @@ fn extract_layers(value: &serde_json::Value) -> Result<Vec<LayerInput>, JsError>
             index,
             name,
             geometry,
-            // Bridges are not part of the geometry over the wire, so the browser
-            // facade has no tabs to record. The T-06 and T-07 numbers come from
-            // the server, which does place them.
-            bridges: Vec::new(),
-            // No paint order travels either: stacking is decided server-side.
+            bridges: extract_bridges(layer, index)?,
+            // No paint order travels. T-12 still runs, because the validator
+            // falls back to `index` when both orders are absent, and two layers
+            // sharing an index is a crossing with nothing to resolve it. Paint
+            // order is therefore implicit in layer order, and saying so is more
+            // useful than implying a server decides it.
             application_order: None,
         });
     }
     Ok(out)
+}
+
+/// Read the tabs a layer declares, so T-06 and T-07 can measure them.
+///
+/// A tab is geometry once it is merged, and nothing can tell it from any other
+/// neck afterwards — that is the whole reason `LayerInput` carries a list. The
+/// records come from `bridge_unanchored_islands`, which places the tab and names
+/// it in one call, so a document states what was actually built rather than
+/// asserting a number.
+///
+/// Defaults to empty: a layer with no `bridges` field has no tabs to check, which
+/// is the honest reading, and the unanchored-island rule still reports the island
+/// itself.
+fn extract_bridges(layer: &serde_json::Value, index: u32) -> Result<Vec<BridgeRecord>, JsError> {
+    let Some(value) = layer.get("bridges") else {
+        return Ok(Vec::new());
+    };
+    let raw: Vec<BridgeRecord> = serde_json::from_value(value.clone())
+        .map_err(|e| JsError::new(format!("layer {index} bridges: {e}")))?;
+
+    for (position, b) in raw.iter().enumerate() {
+        if !b.width_mm.is_finite() || !b.length_mm.is_finite() {
+            return Err(JsError::new(format!(
+                "layer {index} bridge {position}: width and length must be finite"
+            )));
+        }
+        if b.width_mm <= 0.0 {
+            return Err(JsError::new(format!(
+                "layer {index} bridge {position}: width {} mm is not a neck",
+                b.width_mm
+            )));
+        }
+    }
+    Ok(raw)
 }
 
 /// Pull per-layer tile rectangles, when a nesting plan is present.
@@ -640,11 +744,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[test]
-    fn constants_match_the_kernel_grid() {
-        assert!((mask_kernel::CANON_QUANTUM_MM - CANON_QUANTUM_MM).abs() < f64::EPSILON);
-    }
-
     /// The browser entry point must refuse malformed geometry, not trap on it.
     ///
     /// Regression for ADR-0015. `extract_layers` deserialised geometry without
@@ -738,6 +837,295 @@ mod tests {
         assert!(err.message.contains("inline geometry"), "{}", err.message);
     }
 }
+
+#[cfg(test)]
+mod browser_reach {
+    //! Which of the fifteen checks actually reach the editor.
+    //!
+    //! This exists because a document once claimed four of them could not reach
+    //! the browser at all. That claim was half wrong, and it was wrong in the
+    //! direction that hides work: T-12 does reach the editor, and T-15 reaches it
+    //! with only half its inputs. A coverage claim that is wrong in the optimistic
+    //! direction is worse than no claim, because it closes a task that is not
+    //! closed.
+
+    use super::*;
+
+    const MATERIAL: &str = include_str!("../../profiles/data/matte-vinyl-090.v4.json");
+    const PLOTTER: &str = include_str!("../../profiles/data/knife-25mm.v2.json");
+
+    /// A square of `side` mm with its lower-left corner at (`x`, `y`).
+    fn square_at(x: f64, y: f64, side: f64) -> serde_json::Value {
+        serde_json::json!({
+            "outer": {
+                "points": [[x, y], [x + side, y], [x + side, y + side], [x, y + side]],
+                "closed": true
+            },
+            "holes": []
+        })
+    }
+
+    fn project(layers: serde_json::Value) -> String {
+        serde_json::json!({ "composition": { "layers": layers } }).to_string()
+    }
+
+    fn layer(index: u32, name: &str, square: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "index": index,
+            "name": name,
+            "geometry": { "shapes": [square] }
+        })
+    }
+
+    fn validate(project_json: &str) -> ValidationResult {
+        validate_project_inner(project_json, MATERIAL, PLOTTER).expect("the document validates")
+    }
+
+    #[test]
+    fn two_crossing_layers_in_one_order_are_reported_to_the_editor() {
+        // T-12 compares overlapping layers by application order. The browser
+        // sends `application_order: None` for every layer, so both layers fall
+        // back to their index — and two layers with the *same* index therefore
+        // collide with nothing to resolve them. The check runs; this proves it.
+        let overlapping = project(serde_json::json!([
+            { "index": 1, "name": "Base", "geometry": { "shapes": [square_at(0.0, 0.0, 40.0)] } },
+            { "index": 1, "name": "Detail", "geometry": { "shapes": [square_at(20.0, 20.0, 40.0)] } }
+        ]));
+
+        let result = validate(&overlapping);
+        assert!(
+            result.messages.iter().any(|m| m.contains("перекрыва")),
+            "the crossing must reach the editor: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn layers_with_different_orders_are_not_a_crossing_error() {
+        let ordered = project(serde_json::json!([
+            { "index": 1, "name": "Base", "geometry": { "shapes": [square_at(0.0, 0.0, 40.0)] } },
+            { "index": 2, "name": "Detail", "geometry": { "shapes": [square_at(20.0, 20.0, 40.0)] } }
+        ]));
+
+        let result = validate(&ordered);
+        assert!(
+            !result.messages.iter().any(|m| m.contains("перекрыва")),
+            "a defined order resolves the crossing: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn registration_measures_the_plotter_alone_and_never_the_geometry() {
+        // T-15 is `tool error + geometric spread`, and no registration anchor
+        // travels through this path, so the geometric half is always zero. The
+        // profiles put the tool error at 0.30 mm against a 0.35 mm budget: the
+        // only way this can fail is the plotter, never the layers.
+        let clean = project(serde_json::json!([
+            layer(1, "Base", square_at(0.0, 0.0, 40.0)),
+            layer(2, "Detail", square_at(20.0, 20.0, 40.0))
+        ]));
+        let result = validate(&clean);
+        assert!(
+            !result.messages.iter().any(|m| m.contains("не совместятся")),
+            "the tool fits its own budget: {:?}",
+            result.messages
+        );
+
+        // A plotter that cannot hold its own registration budget is reported,
+        // which shows the rule is live rather than unreachable.
+        let bad_plotter = PLOTTER.replace("0.30", "0.90");
+        let report =
+            validate_project_inner(&clean, MATERIAL, &bad_plotter).expect("valid profiles");
+        assert!(
+            report.messages.iter().any(|m| m.contains("не совместятся")),
+            "the rule fires on the plotter budget: {:?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn a_tab_the_browser_placed_is_checked_against_the_material() {
+        // BUG-013. A 0.2 mm neck against a 0.80 mm minimum: the frame around it is
+        // 5 mm thick, so measuring the geometry alone would call the layer fine.
+        // Placing the tab and recording it is what makes T-06 fire here.
+        let repair = repair_island(3.0, 0.2, 30.0);
+        assert_eq!(repair.bridges.len(), 1, "one island, one tab");
+        assert!((repair.bridges[0].width_mm - 0.2).abs() < 1e-9);
+
+        let result = validate(&project(serde_json::json!([layer_with_bridges(
+            1, "Base", repair
+        )])));
+        assert!(
+            result
+                .messages
+                .iter()
+                .any(|m| m.contains("уже минимальной ширины")),
+            "T-06 must reach the editor: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_tab_placed_longer_than_the_material_allows_is_reported() {
+        // The placement limit and the material limit are different numbers on
+        // purpose: placing a 30 mm neck is allowed by the request, and the
+        // validator then refuses it against the material's 25 mm. That is T-07
+        // catching a real decision, not a repair that failed.
+        let repair = repair_island(40.0, 1.4, 80.0);
+        // The span is corner to corner, so it is longer than the gap itself.
+        assert!(
+            repair.bridges[0].length_mm > 25.0,
+            "the tab must exceed the material limit to be worth reporting, got {} mm",
+            repair.bridges[0].length_mm
+        );
+
+        let result = validate(&project(serde_json::json!([layer_with_bridges(
+            1, "Base", repair
+        )])));
+        assert!(
+            result.messages.iter().any(|m| m.contains("длиннее")),
+            "T-07 must reach the editor: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_tab_that_fits_the_material_reaches_no_complaint() {
+        let repair = repair_island(3.0, 1.4, 12.0);
+        let result = validate(&project(serde_json::json!([layer_with_bridges(
+            1, "Base", repair
+        )])));
+        assert!(
+            !result
+                .messages
+                .iter()
+                .any(|m| m.contains("мост") || m.contains("длиннее")),
+            "a good tab must not invent a problem: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_declared_tab_cannot_make_a_bad_neck_pass() {
+        // The dangerous direction of trusting a document's numbers: claim a wide
+        // tab while the geometry is thin. The width rule on the geometry is
+        // independent of the record, so the neck is caught anyway — and it is
+        // caught by measurement only because BUG-015 was fixed; before the fix a
+        // 0.2 mm tab in a 200 mm part measured as 33 mm and this document would
+        // have passed on both counts.
+        let mut overstated = repair_island(3.0, 0.2, 12.0);
+        overstated.bridges[0].width_mm = 4.0;
+        let result = validate(&project(serde_json::json!([layer_with_bridges(
+            1, "Base", overstated
+        )])));
+        assert!(
+            result.messages.iter().any(|m| m.contains("Слой 1")),
+            "the geometry is still measured: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn the_field_rule_falls_back_to_the_uncut_layer_in_the_browser() {
+        // `extract_tiles` reads `nesting.layers[].tiles[].bbox`, a shape that no
+        // schema defines, no fixture contains and no artifact produces — pinned
+        // here so the behaviour is a stated fact rather than an accident. The
+        // consequence is the safe direction: with no plan, the rule measures the
+        // whole layer, so a layer that would nest fine is reported as too large.
+        // That is an over-report, not a silent pass, which is why it did not
+        // become a defect on its own; see BUG-014 and BUG-016.
+        let too_wide = project(serde_json::json!([layer(
+            1,
+            "Base",
+            square_at(0.0, 0.0, 400.0)
+        )]));
+        let result = validate(&too_wide);
+        assert!(
+            result.messages.iter().any(|m| m.contains("рабочее поле")),
+            "a 400 mm layer on a 284 mm plotter must be reported: {:?}",
+            result.messages
+        );
+
+        // A document that does carry the undocumented shape is honoured, so the
+        // contract is visible in one place instead of implied in two.
+        let nested = serde_json::json!({
+            "composition": { "layers": [{
+                "index": 1,
+                "name": "Base",
+                "geometry": { "shapes": [square_at(0.0, 0.0, 400.0)] }
+            }]},
+            "nesting": { "layers": [{
+                "layer": 1,
+                "tiles": [{ "bbox": [0.0, 0.0, 200.0, 200.0] }]
+            }]}
+        });
+        let result = validate(&nested.to_string());
+        assert!(
+            !result.messages.iter().any(|m| m.contains("рабочее поле")),
+            "a plan that fits silences the field rule: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_bridge_record_without_a_position_is_refused() {
+        // `at` is what makes a record traceable to a place on the film. A record
+        // without it is not a record of anything, and defaulting it to the origin
+        // would put a tab somewhere nobody cut.
+        let broken = serde_json::json!({
+            "composition": { "layers": [{
+                "index": 1,
+                "name": "Base",
+                "geometry": { "shapes": [square_at(0.0, 0.0, 40.0)] },
+                "bridges": [{ "width_mm": 1.2, "length_mm": 10.0 }]
+            }]}
+        });
+        let err = extract_layers(&broken).expect_err("a record needs a position");
+        assert!(err.message.contains("bridges"), "{}", err.message);
+    }
+
+    /// A frame with an island floating `gap_mm` away inside its hole: the shape
+    /// the repair exists for.
+    ///
+    /// The gap is a parameter because it is also the tab length the repair
+    /// produces — the span between the two attachment points — so a test can ask
+    /// for a short tab and a long one without a second fixture.
+    fn island_in_a_frame(gap_mm: f64) -> String {
+        let outer = 200.0;
+        let frame = serde_json::json!({
+            "outer": {
+                "points": [[0.0,0.0],[outer,0.0],[outer,outer],[0.0,outer]],
+                "closed": true
+            },
+            "holes": [{
+                "points": [
+                    [gap_mm, gap_mm],
+                    [gap_mm, outer - gap_mm],
+                    [outer - gap_mm, outer - gap_mm],
+                    [outer - gap_mm, gap_mm]
+                ],
+                "closed": true
+            }]
+        });
+        let island = square_at(2.0 * gap_mm, 2.0 * gap_mm, 4.0);
+        serde_json::json!({ "shapes": [frame, island] }).to_string()
+    }
+
+    fn repair_island(gap_mm: f64, tab_mm: f64, max_length_mm: f64) -> RepairResult {
+        bridge_inner(&island_in_a_frame(gap_mm), tab_mm, max_length_mm)
+            .expect("the island is reachable")
+    }
+
+    fn layer_with_bridges(index: u32, name: &str, repair: RepairResult) -> serde_json::Value {
+        serde_json::json!({
+            "index": index,
+            "name": name,
+            "geometry": { "shapes": repair.shapes.shapes },
+            "bridges": repair.bridges
+        })
+    }
+}
 #[cfg(test)]
 mod consistency_tests {
     //! The point of ADR-0013: one geometry implementation, two runtimes.
@@ -756,13 +1144,6 @@ mod consistency_tests {
             }]
         })
         .to_string()
-    }
-
-    #[test]
-    fn the_baked_grid_matches_the_kernel_grid_exactly() {
-        // If these drift, every hash produced in the browser differs from the
-        // server and the metrics cache silently stops working.
-        assert_eq!(CANON_QUANTUM_MM, mask_kernel::CANON_QUANTUM_MM);
     }
 
     #[test]
