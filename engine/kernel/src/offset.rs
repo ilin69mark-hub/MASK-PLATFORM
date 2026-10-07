@@ -24,6 +24,12 @@ type Pt = [f64; 2];
 /// the canonical grid. More steps would not change any printed digit.
 const WIDTH_SEARCH_STEPS: u32 = 28;
 
+/// First delta tried when climbing towards a neck, in millimetres.
+///
+/// Below any physically meaningful neck, and small enough that the first bracket
+/// around a 0.2 mm tab is [0.05, 0.1] mm — two offsets instead of thirty.
+const NECK_SEARCH_SEED_MM: f64 = 0.05;
+
 /// Pinned globally, never chosen per call (ADR-0003 N-1, ADR-0004 D5).
 #[must_use]
 pub fn lib_math_mode() -> MathMode {
@@ -227,11 +233,16 @@ pub fn min_width(shape: &Shapes) -> Option<f64> {
 /// inscribed circle, which equals the band width for a band and says nothing
 /// about a neck; the narrowest neck is `2 × min` over the medial axis, and
 /// computing a medial axis is not a local change to this file. Bisection on the
-/// offset topology answers it exactly, with the library doing the geometry.
+/// offset topology answers it, with the library doing the geometry.
 ///
-/// The signal is monotonic in the useful direction: once a delta has changed
-/// the component count, every larger delta has too, so the smallest such delta
-/// is well defined.
+/// **The component count is not monotonic in the delta, so the search must not
+/// assume it is.** This was measured, not assumed: a frame 40 mm across with a
+/// 0.2 mm tab comes apart at 0.1 mm, is whole again at 2 mm, and comes apart
+/// once more at 3.4 mm. A bisection started from the top of the range lands on
+/// whichever of those boundaries its path happens to cross, which is why the
+/// same tab measured 0.2 mm inside a 20 mm frame and 6.76 mm inside a 40 mm one.
+/// The search therefore grows from a small delta until the count changes, and
+/// bisects only the bracket it found — the first change is the neck.
 ///
 /// Holes are never components. A ring eroded to half its bar width is still one
 /// ring, and counting the hole as a second piece would report every window in a
@@ -251,13 +262,6 @@ pub fn narrowest_neck(shape: &Shapes) -> Option<f64> {
     let (_, _, w, h) = bounding_box(shape);
     let ceiling = w.max(h) / 2.0;
 
-    let mut lo = 0.0_f64; // known to stay one piece
-    let mut hi = ceiling;
-    let mut guard = 0;
-
-    // Grow until it does come apart, so the search range is real rather than
-    // assumed. A shape with no neck will keep holding together, and this
-    // terminates on the guard instead of running forever.
     // "Came apart" means the count is no longer what it was — either it split
     // into more pieces, or it eroded away entirely. Testing only for "more"
     // misses the vanishing case, which is the ordinary band and is why the
@@ -268,18 +272,28 @@ pub fn narrowest_neck(shape: &Shapes) -> Option<f64> {
             .unwrap_or(true)
     };
 
-    loop {
-        if came_apart(hi) || guard >= 48 {
-            break;
-        }
-        hi *= 2.0;
+    // Climb from below rather than starting at the ceiling, because the predicate
+    // is not monotonic: the offset can briefly re-join pieces it had just
+    // separated, and a bisection from the top would return that later crossing
+    // instead of the neck. Doubling reaches the same bracket in about
+    // log2(ceiling / seed) calls, so this costs a handful of offsets more than
+    // the old unconditional bisection.
+    let mut lo = 0.0_f64; // known to stay one piece
+    let mut hi = NECK_SEARCH_SEED_MM.min(ceiling);
+    let mut guard = 0;
+    while !came_apart(hi) {
+        lo = hi;
+        hi = (hi * 2.0).min(ceiling);
         guard += 1;
+        // A shape with no neck keeps holding together all the way to the
+        // ceiling; stop there rather than looping on an unchanged bound.
+        if hi <= lo || guard >= 64 {
+            return None;
+        }
     }
 
-    if !came_apart(hi) {
-        return None;
-    }
-
+    // The bracket is one doubling wide, and inside it the predicate does change
+    // exactly once — that is what makes it a bracket.
     for _ in 0..WIDTH_SEARCH_STEPS {
         let mid = (lo + hi) / 2.0;
         if came_apart(mid) {
@@ -392,6 +406,99 @@ mod tests {
             assert!(
                 width > tab * 2.0,
                 "min_width should still be blind to the tab, got {width:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bridge_tab_measures_the_same_however_big_the_part_is() {
+        // The regression this search rewrite exists for. The test above used a
+        // 20 mm frame, where the answer was right. Scaling the same construction
+        // up kept the 0.2 mm tab and broke the measurement: 40 mm reported
+        // 6.76 mm, 80 mm reported 13.42, 200 mm reported 33.41 — a mask whose
+        // island is held by a fifth of a millimetre of vinyl passing a
+        // 0.80 mm minimum, on exactly the sizes that get cut.
+        //
+        // The cause was the search, not the offset. The component count is not
+        // monotonic in the delta — at 40 mm the shape splits at 0.1 mm, is whole
+        // again at 2 mm, and splits once more at 3.4 mm — so a bisection started
+        // from the ceiling returned whichever crossing its path happened to find.
+        for thickness in [5.0, 10.0, 20.0, 50.0, 100.0] {
+            let outer = thickness * 4.0;
+            let frame = Shape::with_holes(
+                Contour {
+                    points: vec![p(0.0, 0.0), p(outer, 0.0), p(outer, outer), p(0.0, outer)],
+                    closed: true,
+                    arcs: Vec::new(),
+                },
+                vec![Contour {
+                    points: vec![
+                        p(thickness, thickness),
+                        p(thickness, outer - thickness),
+                        p(outer - thickness, outer - thickness),
+                        p(outer - thickness, thickness),
+                    ],
+                    closed: true,
+                    arcs: Vec::new(),
+                }],
+            );
+            let island = Shape::new(Contour {
+                points: vec![
+                    p(thickness + 3.0, thickness + 3.0),
+                    p(thickness + 7.0, thickness + 3.0),
+                    p(thickness + 7.0, thickness + 7.0),
+                    p(thickness + 3.0, thickness + 7.0),
+                ],
+                closed: true,
+                arcs: Vec::new(),
+            });
+            let (joined, _) = crate::bridge::bridge_unanchored(
+                &Shapes {
+                    shapes: vec![frame, island],
+                },
+                crate::bridge::BridgeLimits {
+                    width_mm: 0.2,
+                    max_length_mm: 10_000.0,
+                },
+            )
+            .expect("bridge");
+
+            let neck = narrowest_neck(&joined).expect("a tab always comes apart");
+            assert!(
+                (neck - 0.2).abs() < 1e-2,
+                "a 0.2 mm tab in a {outer} mm part measured {neck:.4}; \
+                 the answer must not depend on how big the part is"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ring_is_still_measured_as_its_own_thickness_at_every_scale() {
+        // The rewrite changed how the bracket is found, so the plain case is
+        // pinned too: a ring with no island has no neck other than its bar.
+        for thickness in [5.0, 10.0, 20.0, 50.0] {
+            let outer = thickness * 4.0;
+            let ring = Shapes::single(Shape::with_holes(
+                Contour {
+                    points: vec![p(0.0, 0.0), p(outer, 0.0), p(outer, outer), p(0.0, outer)],
+                    closed: true,
+                    arcs: Vec::new(),
+                },
+                vec![Contour {
+                    points: vec![
+                        p(thickness, thickness),
+                        p(thickness, outer - thickness),
+                        p(outer - thickness, outer - thickness),
+                        p(outer - thickness, thickness),
+                    ],
+                    closed: true,
+                    arcs: Vec::new(),
+                }],
+            ));
+            let neck = narrowest_neck(&ring).expect("a ring erodes");
+            assert!(
+                (neck - thickness).abs() < 1e-2,
+                "a {thickness} mm ring measured {neck:.4}"
             );
         }
     }
