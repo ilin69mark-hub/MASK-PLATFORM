@@ -130,10 +130,19 @@ export function StudioCanvas({
   const ready = measurement.status === "ready" ? measurement.result : undefined;
 
   const view = useMemo(() => {
-    const [, , w, h] = ready?.bbox ?? [0, 0, 100, 100];
+    // The first two numbers are where the geometry starts, not decoration. They
+    // used to be discarded — the measurement reported `[0, 0, w, h]` whatever the
+    // input — so the view was built around the origin and any geometry not at the
+    // origin was drawn off the visible area.
+    const [minX, minY, w, h] = ready?.bbox ?? [0, 0, 100, 100];
     // Padding in millimetres, so the margin looks the same at any zoom.
     const pad = Math.max(w, h) * 0.04 || 5;
-    return { minX: -pad, minY: -pad, w: w + pad * 2, h: h + pad * 2 };
+    return {
+      minX: minX - pad,
+      minY: minY - pad,
+      w: w + pad * 2,
+      h: h + pad * 2,
+    };
   }, [ready]);
 
   const pathData = ready?.path_data ?? [];

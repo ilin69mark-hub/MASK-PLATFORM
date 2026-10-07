@@ -64,6 +64,10 @@ export interface LayerResult {
   /** Absent rather than null: see the note in the Rust struct. */
   island_count: number;
   hole_count: number;
+  /**
+   * `[minX, minY, width, height]` in millimetres — the same four numbers and the
+   * same order the validator publishes.
+   */
   bbox: [number, number, number, number];
   content_hash: string;
   /** Canonical SVG path data, ready to draw without further processing. */

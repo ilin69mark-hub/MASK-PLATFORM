@@ -32,6 +32,15 @@ use wasm_bindgen::prelude::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerResult {
     pub area_mm2: f64,
+    /// The narrowest thing that holds the layer together.
+    ///
+    /// The minimum of `min_width` and `narrowest_neck` per region, which is what
+    /// the validator measures (`mask_validate::measure_layer`). It used to be
+    /// `min_width` alone here, and that is a number the editor must not show: a
+    /// 4 mm band with a 0.2 mm whisker measured 4.000 mm in the browser while the
+    /// validator measured 0.2 mm. The editor's threshold line then reported the
+    /// mask as acceptable and the station rejected it — the one disagreement
+    /// ADR-0013 exists to prevent.
     pub min_width_mm: Option<f64>,
     /// Tightest gap between two regions, and which two.
     ///
@@ -58,6 +67,13 @@ pub struct LayerResult {
     pub self_intersections: Vec<Crossing>,
     pub island_count: usize,
     pub hole_count: usize,
+    /// `[min_x, min_y, width, height]`, the same four numbers and the same order
+    /// the validator publishes and `VALIDATOR.md` documents.
+    ///
+    /// It used to start at zero unconditionally, which was wrong wherever the
+    /// geometry did not: a region at x = 812…908 reported `[0, 0, 96, 72]`. A
+    /// drawing consumer that trusts the first two numbers draws in the wrong
+    /// place, and a viewport built from them shows nothing at all.
     pub bbox: [f64; 4],
     pub content_hash: String,
     /// Paths as SVG path data, already canonicalised and quantised.
@@ -369,12 +385,29 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
         .validate_strict(mask_kernel::MAX_COORDINATE_MM)
         .map_err(|e| JsError::new(e.to_string()))?;
 
-    let (_, _, w, h) = mask_kernel::bounding_box(&shapes);
+    let (min_x, min_y, w, h) = mask_kernel::bounding_box(&shapes);
 
+    // Both widths, per region, then the minimum across regions — the same
+    // reduction the validator performs. `min_width` alone cannot see a thin
+    // appendage: a 4 mm band with a 0.2 mm whisker reports 4.000 mm, because the
+    // band keeps the figure intact long after the whisker has closed.
+    // `narrowest_neck` counts components and sees it, which is why the validator
+    // takes the smaller of the two and why the browser has to as well.
     let min_width_mm = shapes
         .shapes
         .iter()
-        .filter_map(|s| mask_kernel::min_width(&Shapes::single(s.clone())))
+        .filter_map(|s| {
+            let one = Shapes::single(s.clone());
+            match (
+                mask_kernel::min_width(&one),
+                mask_kernel::narrowest_neck(&one),
+            ) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            }
+        })
         .reduce(f64::min);
 
     // T-02. Absent rather than zero for a single region: one piece of film has no
@@ -411,7 +444,7 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
         self_intersections,
         island_count: shapes.shapes.len(),
         hole_count: shapes.shapes.iter().map(|s| s.holes.len()).sum(),
-        bbox: [0.0, 0.0, w, h],
+        bbox: [min_x, min_y, w, h],
         content_hash: ContentHash::of(&shapes).to_string(),
         path_data,
     })
@@ -1428,6 +1461,9 @@ mod consistency_tests {
         .to_string()
     }
 
+    const MATERIAL: &str = include_str!("../../profiles/data/matte-vinyl-090.v4.json");
+    const PLOTTER: &str = include_str!("../../profiles/data/knife-25mm.v2.json");
+
     #[test]
     fn the_math_mode_is_the_pinned_integer_one() {
         // Read through Debug so the assertion does not need a direct dependency
@@ -1449,6 +1485,184 @@ mod consistency_tests {
             arcs: Vec::new(),
         });
         assert_eq!(result.path_data[0], server);
+    }
+
+    /// A band 4 mm wide carrying a 0.2 mm whisker: a thin *appendage*, which
+    /// eroding the band deletes without changing the piece count.
+    ///
+    /// This is the shape both width measures are documented to miss. It is kept
+    /// here to pin that the browser misses it in exactly the same way the
+    /// validator does — two runtimes blind together is not a disagreement, and a
+    /// test that only asserted the browser's own answer would hide one.
+    fn band_with_whisker() -> String {
+        serde_json::json!({
+            "shapes": [{
+                "outer": {
+                    "points": [
+                        [0.0, 0.0], [40.0, 0.0], [40.0, 4.0],
+                        [20.1, 4.0], [20.0, 4.0], [20.0, 20.0],
+                        [19.9, 20.0], [19.9, 4.0], [0.0, 4.0]
+                    ],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    /// A frame, an island inside its hole, and a 0.2 mm tab joining them.
+    ///
+    /// The tab is a real neck — it is the only place the piece comes apart — and
+    /// this is the geometry BUG-015 was about.
+    fn frame_island_and_tab() -> String {
+        let frame = serde_json::json!({
+            "outer": {
+                "points": [[0.0,0.0],[20.0,0.0],[20.0,20.0],[0.0,20.0]],
+                "closed": true
+            },
+            "holes": [{
+                "points": [[5.0,5.0],[5.0,15.0],[15.0,15.0],[15.0,5.0]],
+                "closed": true
+            }]
+        });
+        let island = serde_json::json!({
+            "outer": {
+                "points": [[8.0,8.0],[12.0,8.0],[12.0,12.0],[8.0,12.0]],
+                "closed": true
+            },
+            "holes": []
+        });
+        let shapes: Shapes =
+            serde_json::from_value(serde_json::json!({ "shapes": [frame, island] }))
+                .expect("parse");
+        let (joined, _) = mask_kernel::bridge::bridge_unanchored(
+            &shapes,
+            mask_kernel::bridge::BridgeLimits {
+                width_mm: 0.2,
+                max_length_mm: 25.0,
+            },
+        )
+        .expect("bridge");
+        serde_json::to_string(&joined).expect("json")
+    }
+
+    /// What the validator publishes for the same geometry.
+    ///
+    /// Not a recomputation: the validator's own `report.layers[0].min_width_mm`,
+    /// which is the number a submitted project is judged by.
+    fn validator_width(shapes_json: &str) -> f64 {
+        let geometry: Shapes = serde_json::from_str(shapes_json).expect("parse");
+        let material: MaterialProfile = serde_json::from_str(MATERIAL).expect("material");
+        let plotter: PlotterProfile = serde_json::from_str(PLOTTER).expect("plotter");
+        let cutting = CuttingProfile::derive(&material, &plotter);
+        let rules = RuleSet::from_profile(&cutting);
+        let report = mask_validate::validate(
+            &[LayerInput {
+                index: 1,
+                name: "consistency".into(),
+                geometry,
+                bridges: Vec::new(),
+                application_order: None,
+            }],
+            &cutting,
+            &rules,
+            false,
+        );
+        report.layers[0]
+            .min_width_mm
+            .expect("the validator publishes a width for a band")
+    }
+
+    #[test]
+    fn the_browser_reports_the_narrowest_neck_the_validator_measures() {
+        // BUG-019. The editor's threshold line compares this number against the
+        // material minimum, so a number that disagrees with the validator turns
+        // the editor into a machine that certifies masks the station rejects.
+        let geometry = frame_island_and_tab();
+
+        let browser = measure_layer_inner(&geometry)
+            .expect("measure")
+            .min_width_mm
+            .expect("a measurement");
+        let validator = validator_width(&geometry);
+
+        assert!(
+            (browser - 0.2).abs() < 0.05,
+            "the tab is 0.2 mm and must be the answer, got {browser:.4}"
+        );
+        assert!(
+            (browser - validator).abs() < 1e-3,
+            "the browser said {browser:.4} and the validator {validator:.4}"
+        );
+    }
+
+    #[test]
+    fn a_thin_appendage_is_missed_by_both_runtimes_alike() {
+        // The honest counterweight to the test above. A whisker on a wide band is
+        // invisible to `min_width` and to `narrowest_neck`, and now to the browser
+        // too — which is only correct because the validator misses it the same
+        // way. If the validator ever starts seeing it, this test fails and says so.
+        let geometry = band_with_whisker();
+
+        let browser = measure_layer_inner(&geometry)
+            .expect("measure")
+            .min_width_mm
+            .expect("a measurement");
+        let validator = validator_width(&geometry);
+
+        assert!(
+            (browser - 4.0).abs() < 0.01,
+            "the documented blind spot is the band's own width, got {browser:.4}"
+        );
+        assert!(
+            (browser - validator).abs() < 1e-3,
+            "agreement matters more than the number: browser {browser:.4}, validator {validator:.4}"
+        );
+    }
+
+    #[test]
+    fn a_plain_band_still_measures_as_its_own_width() {
+        // `narrowest_neck` is a component count, and a band has no neck. Reporting
+        // the tab above must not start reporting a neck where there is none.
+        let result = measure_layer_inner(&square(40.0, 4.0)).expect("measure");
+        let reported = result.min_width_mm.expect("a measurement");
+        assert!(
+            (reported - 4.0).abs() < 0.01,
+            "a 4 mm band measures 4 mm, got {reported:.4}"
+        );
+    }
+
+    #[test]
+    fn the_bounding_box_starts_where_the_geometry_starts() {
+        // BUG-018. A viewport is built from the first two numbers, so a region
+        // away from the origin has to report where it actually is — a region at
+        // x = 812…908 reporting `[0, 0, 96, 72]` puts the drawing 812 mm off the
+        // visible area.
+        let away = serde_json::json!({
+            "shapes": [{
+                "outer": {
+                    "points": [[812.0, 640.0], [908.0, 640.0], [908.0, 712.0], [812.0, 712.0]],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string();
+
+        let result = measure_layer_inner(&away).expect("measure");
+        let [min_x, min_y, w, h] = result.bbox;
+        assert!(
+            (min_x - 812.0).abs() < 1e-9 && (min_y - 640.0).abs() < 1e-9,
+            "the origin must survive, got [{min_x}, {min_y}, {w}, {h}]"
+        );
+        assert!((w - 96.0).abs() < 1e-9 && (h - 72.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_bounding_box_of_a_region_at_the_origin_is_unchanged() {
+        let result = measure_layer_inner(&square(10.0, 5.0)).expect("measure");
+        assert_eq!(result.bbox, [0.0, 0.0, 10.0, 5.0]);
     }
 
     #[test]
