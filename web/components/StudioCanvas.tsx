@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   type Crossing,
@@ -41,9 +41,6 @@ const MIN_WIDTH_EPS_MM = 1e-3;
 export interface StudioProps {
   /** Geometry of the selected layer, in millimetres. */
   shapes: Shapes;
-  /** Profile JSON, loaded once and reused for validation. */
-  materialJson: string;
-  plotterJson: string;
   projectId: string;
   revision: number;
   /** Minimum element width for the profile, shown as a threshold line. */
@@ -64,14 +61,11 @@ type Measurement = MeasurementState<LayerResult>;
 
 export function StudioCanvas({
   shapes,
-  materialJson,
-  plotterJson,
   projectId,
   revision,
   minWidthMm,
   minGapMm,
 }: StudioProps) {
-  const svgRef = useRef<SVGSVGElement | null>(null);
   const [mode, setMode] = useState<ViewMode>("mask");
   const [kernelReady, setKernelReady] = useState(false);
   const [measurement, setMeasurement] = useState<Measurement>({ status: "idle" });
@@ -186,7 +180,6 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
 
       <div className="studio-canvas">
         <svg
-          ref={svgRef}
           viewBox={`${view.minX} ${view.minY} ${view.w} ${view.h}`}
           preserveAspectRatio="xMidYMid meet"
           role="img"
@@ -313,7 +306,7 @@ function CrossingWarning({ crossings }: { crossings: Crossing[] }) {
   );
 }
 
-function StatusBar({
+export function StatusBar({
   measurement,
   kernelReady,
   minWidthMm,

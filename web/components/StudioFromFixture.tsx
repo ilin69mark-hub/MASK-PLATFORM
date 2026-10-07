@@ -33,8 +33,6 @@ export interface StudioFromFixtureProps {
   projectId: string;
   revision: number;
   layers: FixtureLayerData[];
-  materialJson: string;
-  plotterJson: string;
   minWidthMm: number;
   /** Minimum gap between two elements (T-02), from the same profile. */
   minGapMm: number;
@@ -65,8 +63,6 @@ export function StudioFromFixture({
   projectId,
   revision,
   layers,
-  materialJson,
-  plotterJson,
   minWidthMm,
   minGapMm,
 }: StudioFromFixtureProps) {
@@ -152,8 +148,6 @@ export function StudioFromFixture({
       {current && (
         <StudioCanvas
           shapes={current}
-          materialJson={materialJson}
-          plotterJson={plotterJson}
           projectId={projectId}
           revision={revision}
           minWidthMm={minWidthMm}

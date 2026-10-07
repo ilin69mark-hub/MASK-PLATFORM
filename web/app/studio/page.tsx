@@ -6,9 +6,9 @@ import { StudioFromFixture, type FixtureLayerData } from "@/components/StudioFro
 /**
  * Mask Studio page.
  *
- * Reads the same profile and fixture files the CLI uses. Pointing the studio at
- * a different material than production would be a silent way to validate a design
- * against thresholds that will not apply on the bench.
+ * Reads the same material profile and fixture files the CLI uses. Pointing the
+ * studio at a different material than production would be a silent way to validate
+ * a design against thresholds that will not apply on the bench.
  *
  * Server component: it only reads files. All geometry work happens in the
  * browser through the WASM kernel, because the kernel needs no server and the
@@ -22,7 +22,6 @@ const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../../..");
 
 const FIXTURE = resolve(ROOT, "engine/fixtures/proof_panel.json");
 const MATERIAL = resolve(ROOT, "engine/profiles/data/matte-vinyl-090.v4.json");
-const PLOTTER = resolve(ROOT, "engine/profiles/data/knife-25mm.v2.json");
 
 interface Fixture {
   project_id: string;
@@ -36,10 +35,9 @@ interface Fixture {
 }
 
 export default async function StudioPage() {
-  const [fixtureText, materialJson, plotterJson] = await Promise.all([
+  const [fixtureText, materialJson] = await Promise.all([
     readFile(FIXTURE, "utf8"),
     readFile(MATERIAL, "utf8"),
-    readFile(PLOTTER, "utf8"),
   ]);
 
   const fixture = JSON.parse(fixtureText) as Fixture;
@@ -63,8 +61,6 @@ export default async function StudioPage() {
         projectId={fixture.project_id}
         revision={fixture.revision}
         layers={layers}
-        materialJson={materialJson}
-        plotterJson={plotterJson}
         minWidthMm={material.minimums.line_width_mm}
         minGapMm={material.minimums.gap_mm}
       />
