@@ -22,13 +22,17 @@ use crate::constants::MEASURE_EPS_MM;
 use crate::geom::{Contour, Point, Shape, Shapes};
 
 /// A pixel raster. Greyscale or RGB, 8 bits per channel.
+///
+/// The fields are private so the length invariant checked by `new` cannot be
+/// bypassed by direct construction. Metadata needed elsewhere is available
+/// through read-only accessors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Raster {
-    pub width: usize,
-    pub height: usize,
+    width: usize,
+    height: usize,
     /// Row-major, `channels` bytes per pixel.
-    pub data: Vec<u8>,
-    pub channels: usize,
+    data: Vec<u8>,
+    channels: usize,
 }
 
 impl Raster {
@@ -62,6 +66,24 @@ impl Raster {
     /// Convenience constructor for a single-channel image.
     pub fn grey(width: usize, height: usize, data: Vec<u8>) -> Result<Self, ImageError> {
         Self::new(width, height, 1, data)
+    }
+
+    /// Image width in pixels.
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Image height in pixels.
+    #[must_use]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Bytes per pixel: 1, 3, or 4.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        self.channels
     }
 
     /// How many millimetres one pixel covers.

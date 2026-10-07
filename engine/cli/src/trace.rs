@@ -216,8 +216,8 @@ pub fn trace(raster: &Raster, options: &TraceOptions) -> Result<TraceReport, Tra
         .fold(0.0, f64::max);
 
     Ok(TraceReport {
-        image_width_px: raster.width,
-        image_height_px: raster.height,
+        image_width_px: raster.width(),
+        image_height_px: raster.height(),
         mm_per_pixel: scale,
         palette: separation.palette.iter().map(|c| (c.0, c.1, c.2)).collect(),
         layers,
@@ -294,7 +294,7 @@ fn max_min(values: &[f64]) -> f64 {
 
 /// Build the fixture JSON that the rest of `maskctl` consumes.
 fn build_fixture(report: &TraceReport, raster: &Raster, options: &TraceOptions) -> FixtureOut {
-    let height_mm = options.part_width_mm * (raster.height as f64 / raster.width as f64);
+    let height_mm = options.part_width_mm * (raster.height() as f64 / raster.width() as f64);
 
     FixtureOut {
         project_id: options.project_id.clone(),
@@ -303,7 +303,10 @@ fn build_fixture(report: &TraceReport, raster: &Raster, options: &TraceOptions) 
             "TRACED from a {}x{} image at {} mm wide, so {} mm per pixel. \
              Colour layers, no cut width: widths come from the profile. \
              Validate before cutting.",
-            raster.width, raster.height, options.part_width_mm, report.mm_per_pixel
+            raster.width(),
+            raster.height(),
+            options.part_width_mm,
+            report.mm_per_pixel
         ),
         target: FixtureTargetOut {
             object: "Traced image".to_string(),

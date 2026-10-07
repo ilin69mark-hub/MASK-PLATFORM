@@ -231,7 +231,10 @@ mod tests {
     fn pgm_decodes_to_greyscale() {
         let path = temp("grey.pgm", &pgm());
         let raster = decode_file(&path).expect("decode");
-        assert_eq!((raster.width, raster.height, raster.channels), (4, 2, 1));
+        assert_eq!(
+            (raster.width(), raster.height(), raster.channels()),
+            (4, 2, 1)
+        );
         assert_eq!(raster.luma(0, 0), 0.0);
         assert_eq!(raster.luma(3, 1), 255.0);
         let _ = fs::remove_file(path);
@@ -243,7 +246,7 @@ mod tests {
         bytes.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
         let path = temp("colour.ppm", &bytes);
         let raster = decode_file(&path).expect("decode");
-        assert_eq!(raster.channels, 3);
+        assert_eq!(raster.channels(), 3);
         assert_eq!(raster.pixel(0, 0), [255, 0, 0, 255]);
         assert_eq!(raster.pixel(1, 0), [0, 0, 255, 255]);
         let _ = fs::remove_file(path);
@@ -255,7 +258,7 @@ mod tests {
         bytes.extend_from_slice(&[0, 255, 0, 255]);
         let path = temp("commented.pgm", &bytes);
         let raster = decode_file(&path).expect("decode");
-        assert_eq!((raster.width, raster.height), (4, 1));
+        assert_eq!((raster.width(), raster.height()), (4, 1));
         let _ = fs::remove_file(path);
     }
 
@@ -330,7 +333,7 @@ mod tests {
         }
         let path = temp("alpha.png", &png_bytes);
         let raster = decode_file(&path).expect("decode");
-        assert_eq!(raster.channels, 4);
+        assert_eq!(raster.channels(), 4);
         assert_eq!(raster.pixel(1, 0)[3], 0, "transparent stays transparent");
         let _ = fs::remove_file(path);
     }
@@ -348,7 +351,7 @@ mod tests {
         let path = temp("grey-alpha.png", &png_bytes);
         let raster = decode_file(&path).expect("decode");
         // Two channels are not representable in Raster, so alpha must survive.
-        assert_eq!(raster.channels, 4);
+        assert_eq!(raster.channels(), 4);
         assert_eq!(raster.pixel(0, 0), [77, 77, 77, 88]);
         let _ = fs::remove_file(path);
     }
