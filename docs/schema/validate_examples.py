@@ -60,6 +60,41 @@ def check_rejects(schema, instance, label, mutate):
     return False
 
 
+def check_project_geometry_is_metadata_only(instance, label):
+    """Require a Mask Project example to demonstrate ADR-0016.
+
+    The schema itself can require `geometry_id` and reject the unknown
+    `geometry` field, but neither of those checks proves what the stored example
+    contains. A reader could otherwise mistake a valid document for a complete
+    geometric submission.
+    """
+    try:
+        layers = instance["composition"]["layers"]
+    except (KeyError, TypeError) as exc:
+        print(f"FAIL {label}: cannot inspect layers: {type(exc).__name__}")
+        return False
+
+    pointerless = [
+        layer.get("id", f"layer {index}")
+        for index, layer in enumerate(layers)
+        if not isinstance(layer, dict) or not layer.get("geometry_id")
+    ]
+    embedded = [
+        layer.get("id", f"layer {index}")
+        for index, layer in enumerate(layers)
+        if isinstance(layer, dict) and "geometry" in layer
+    ]
+    if pointerless or embedded:
+        print(f"FAIL {label}: Mask Project geometry must be referenced, not embedded")
+        for name in pointerless:
+            print(f"     missing geometry_id: {name}")
+        for name in embedded:
+            print(f"     unexpected inline geometry: {name}")
+        return False
+    print(f"ok   {label}")
+    return True
+
+
 def main():
     project_schema = load("mask-project.v1.json")
     manifest_schema = load("manifest.v1.json")
@@ -81,6 +116,8 @@ def main():
     print("\n── examples must validate ──")
     passed &= check_positive(project_schema, project, "mask-project example")
     passed &= check_positive(manifest_schema, manifest, "manifest example")
+    passed &= check_project_geometry_is_metadata_only(
+        project, "mask-project geometry is referenced, not embedded")
 
     # Every fixture in the repository, not a hand-picked example. A schema nothing
     # is checked against is documentation; these are the documents that decide
@@ -148,6 +185,11 @@ def main():
     passed &= check_rejects(
         project_schema, project, "malformed project id rejected",
         lambda d: d.update(id="mask-127"))
+
+    # A production layer links to geometry; it does not carry vectors.
+    passed &= check_rejects(
+        project_schema, project, "inline layer geometry rejected",
+        lambda d: d["composition"]["layers"][0].update(geometry={"shapes": []}))
 
     # Non-uniform stretching must not be expressible as a scale policy.
     passed &= check_rejects(

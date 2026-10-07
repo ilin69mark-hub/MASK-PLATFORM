@@ -6,7 +6,7 @@
 
 | Файл | Что описывает |
 |---|---|
-| `mask-project.v1.json` | Mask Project — источник истины (`MASK_PROJECT.md`) |
+| `mask-project.v1.json` | Mask Project как производственная метазапись: координатная рамка, но не встроенные векторы. Слой содержит только ссылку `geometry_id` (ADR-0016) |
 | `manifest.v1.json` | Production Manifest — то, что читает сторонний производитель |
 | `fixture.v1.json` | Фикстура — исходная геометрия, которую читает `maskctl`. **Не** Mask Project, см. ADR-0014 |
 | `examples/mask-project.v1.example.json` | Валидный пример проекта |

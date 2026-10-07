@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://maskplatform.dev/schema/mask-project.v1.json",
   "title": "Mask Project v1",
-  "description": "Complete digital description of the production of one multilayer physical mask for a specific vehicle part. The source of truth of the system: SVG/DXF/PLT/PDF are derived artifacts. Units are millimetres (ADR-0004).",
+  "description": "Production metadata record for one multilayer physical mask for a specific vehicle part. It does not contain the mask's vector geometry: `geometry` defines only the coordinate frame, units, and tolerances, while actual vectors live in a separate, revisioned geometry record linked through `composition.layers[].geometry_id` (ADR-0016). SVG/DXF/PLT/PDF are derived artifacts. Units are millimetres (ADR-0004).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -277,6 +277,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["design_space", "units"],
+      "description": "Coordinate-frame metadata only (ADR-0016). This object carries units, placement, and tolerances; it does not carry shapes, contours, points, arcs, or any renderable vector data. Vector geometry belongs to a separately versioned geometry record, linked from each layer through `geometry_id`.",
       "properties": {
         "design_space": {
           "type": "object",
@@ -365,7 +366,11 @@
             "enum": ["adhesive", "cut", "weed", "laminate"]
           }
         },
-        "geometry_id": { "type": "string", "minLength": 1 },
+        "geometry_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Reference to a separately versioned vector-geometry record (ADR-0016). The identifier is metadata, not geometry: validating the layer requires the vector payload itself. Under the current service-less pipeline, that payload is supplied only in the browser evaluation bundle; a `geometry_id` alone cannot be checked (BUG-005)."
+        },
         "nesting_required": { "type": "boolean" },
         "metrics": { "$ref": "#/$defs/layerMetrics" }
       }
