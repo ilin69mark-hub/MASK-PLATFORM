@@ -77,6 +77,14 @@ export interface ValidationResult {
   info_count: number;
   messages: string[];
   limits_physically_verified: boolean;
+  /**
+   * Layers that were laid out because they did not fit the field.
+   *
+   * Empty for {@link validate}. A verdict that differs between the two calls
+   * differs because of this list, so a caller comparing them must read it rather
+   * than assume the geometry was the same.
+   */
+  nested_layers: number[];
 }
 
 export interface EngineConstants {
@@ -114,6 +122,11 @@ interface Kernel {
   widen_centreline(points: string, width: number): LayerResult;
   content_hash(shapes: string): string;
   validate_project(
+    project: string,
+    material: string,
+    plotter: string
+  ): ValidationResult;
+  nest_and_validate_project(
     project: string,
     material: string,
     plotter: string
@@ -296,6 +309,27 @@ export function validate(
   plotterJson: string
 ): ValidationResult {
   return require_().validate_project(
+    JSON.stringify(project),
+    materialJson,
+    plotterJson
+  );
+}
+
+/**
+ * Validate a project the way it will be printed: lay out every layer that does
+ * not fit, then check the layout.
+ *
+ * This is the browser's counterpart to `maskctl --nest`, and the only way the
+ * registration check (T-15) can see geometry — "where a layer starts" exists
+ * only after a layout. The layout is computed by the kernel, never read from the
+ * document, so a project cannot talk its way into passing.
+ */
+export function nestAndValidate(
+  project: unknown,
+  materialJson: string,
+  plotterJson: string
+): ValidationResult {
+  return require_().nest_and_validate_project(
     JSON.stringify(project),
     materialJson,
     plotterJson

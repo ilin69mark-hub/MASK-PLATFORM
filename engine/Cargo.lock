@@ -286,6 +286,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "mask-kernel",
+ "mask-nesting",
  "mask-profiles",
  "mask-rules",
  "mask-validate",

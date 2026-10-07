@@ -15,6 +15,7 @@ mask-kernel.workspace = true
 mask-profiles.workspace = true
 mask-rules.workspace = true
 mask-validate.workspace = true
+mask-nesting.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true

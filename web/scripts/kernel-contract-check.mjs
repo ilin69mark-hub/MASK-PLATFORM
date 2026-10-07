@@ -76,6 +76,7 @@ const FACADE_VALIDATION = [
   "info_count",
   "messages",
   "limits_physically_verified",
+  "nested_layers",
 ];
 
 const EXPORTS = [
@@ -86,6 +87,7 @@ const EXPORTS = [
   "widen_centreline",
   "content_hash",
   "validate_project",
+  "nest_and_validate_project",
 ];
 
 function typeOf(value) {
@@ -212,6 +214,56 @@ async function main() {
   check(
     "messages is an array of strings",
     Array.isArray(verdict.messages) && verdict.messages.every((m) => typeof m === "string")
+  );
+
+  // ── the laid-out call must differ from the un-nested one in a stated way ──
+  //
+  // T-15 can only see geometry when the project is laid out first. If the two
+  // calls returned the same answer for a project that needs nesting, the facade
+  // would be describing a check that is not running — and TypeScript would not
+  // notice, because `nested_layers` is just a field.
+  const wide = JSON.stringify({
+    composition: {
+      layers: [
+        {
+          index: 1,
+          name: "Base",
+          geometry: {
+            shapes: [
+              {
+                outer: {
+                  points: [[0, 0], [400, 0], [400, 400], [0, 400]],
+                  closed: true,
+                },
+                holes: [],
+              },
+            ],
+          },
+        },
+      ],
+    },
+  });
+  const unNested = wasm.validate_project(wide, material, plotter);
+  const nested = wasm.nest_and_validate_project(wide, material, plotter);
+  check(
+    "an un-nested layer that does not fit is reported",
+    unNested.messages.some((m) => m.includes("\u0440\u0430\u0431\u043e\u0447\u0435\u0435 \u043f\u043e\u043b\u0435")),
+    JSON.stringify(unNested.messages)
+  );
+  check(
+    "the laid-out call reports which layers it laid out",
+    Array.isArray(nested.nested_layers) && nested.nested_layers.includes(1),
+    JSON.stringify(nested.nested_layers)
+  );
+  check(
+    "the laid-out call no longer claims the layer does not fit",
+    !nested.messages.some((m) => m.includes("\u0440\u0430\u0431\u043e\u0447\u0435\u0435 \u043f\u043e\u043b\u0435")),
+    JSON.stringify(nested.messages)
+  );
+  check(
+    "and it says so in words, not only in the field list",
+    nested.messages.some((m) => m.includes("\u0440\u0430\u0437\u0431\u0438\u0442")),
+    JSON.stringify(nested.messages)
   );
 
   console.log();

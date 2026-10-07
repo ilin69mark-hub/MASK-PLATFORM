@@ -20,10 +20,12 @@
 use mask_kernel::bridge::{bridge_unanchored, BridgeLimits};
 use mask_kernel::geom::{Point, Shapes};
 use mask_kernel::{measure, ContentHash};
+use mask_nesting::{fixed_grid, needs_nesting, NestRequest};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::{CuttingProfile, RuleSet};
-use mask_validate::{validate_with_nesting, BridgeRecord, LayerInput, Rect4, Verdict};
+use mask_validate::{validate_with_registration, BridgeRecord, LayerInput, Rect4, Verdict};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 
 /// What JavaScript gets back about a layer.
@@ -72,6 +74,13 @@ pub struct ValidationResult {
     /// Headline text per violation, ready to display.
     pub messages: Vec<String>,
     pub limits_physically_verified: bool,
+    /// Layers that were laid out before validation because they did not fit.
+    ///
+    /// Empty for the un-nested call, and the reason a verdict can differ between
+    /// the two entry points: a layer that only fits once it is cut into tiles
+    /// passes the field rule here and fails it there. A caller that compares the
+    /// two must read this field rather than wonder why.
+    pub nested_layers: Vec<u32>,
 }
 
 /// The tightest gap in a layer, and the pair of regions it sits between.
@@ -136,7 +145,35 @@ pub fn validate_project(
     material_json: &str,
     plotter_json: &str,
 ) -> Result<JsValue, JsValue> {
-    to_js(&validate_project_inner(project_json, material_json, plotter_json).map_err(into_js)?)
+    to_js(
+        &validate_project_inner(project_json, material_json, plotter_json, false)
+            .map_err(into_js)?,
+    )
+}
+
+/// Validate a project the way it will actually be printed: lay out every layer
+/// that does not fit the field, then check the layout.
+///
+/// This is the browser's counterpart to `maskctl --nest`, and the reason T-15 can
+/// see geometry at all. The registration check adds the plotter's own error to
+/// the worst spread between where two layers start, and "where a layer starts"
+/// exists only after a layout — so without this call the browser can measure the
+/// plotter and nothing else. The layout is computed here from the same
+/// `fixed_grid` the station uses, never read from the document.
+///
+/// Layers that did not need laying out are returned in `nested_layers` as well as
+/// described in `messages`, so a verdict that improved because of a decision is
+/// never mistaken for a verdict that was always true.
+#[wasm_bindgen]
+pub fn nest_and_validate_project(
+    project_json: &str,
+    material_json: &str,
+    plotter_json: &str,
+) -> Result<JsValue, JsValue> {
+    to_js(
+        &validate_project_inner(project_json, material_json, plotter_json, true)
+            .map_err(into_js)?,
+    )
 }
 
 /// Typed project validation, callable from Rust tests.
@@ -146,10 +183,15 @@ pub fn validate_project(
 /// the registration check (T-15) live inside `validate_with_registration`, which
 /// `validate_with_nesting` calls — so whether they reach the editor is a
 /// question about the *inputs* this function builds, and that is testable.
+///
+/// `nest` decides whether those inputs include a layout. It is the browser's
+/// counterpart to `maskctl --nest`: nesting is a choice somebody makes, so the
+/// validator does not make it silently.
 fn validate_project_inner(
     project_json: &str,
     material_json: &str,
     plotter_json: &str,
+    nest: bool,
 ) -> Result<ValidationResult, JsError> {
     let material: MaterialProfile = parse(material_json, "material profile")?;
     let plotter: PlotterProfile = parse(plotter_json, "plotter profile")?;
@@ -160,22 +202,158 @@ fn validate_project_inner(
     let verified = cutting.is_physically_verified(&material, &plotter);
 
     let layers = extract_layers(&value)?;
-    let tiles = extract_tiles(&value);
+    let layout = if nest {
+        lay_out(&layers, &cutting)
+    } else {
+        Layout::empty()
+    };
 
-    let report = validate_with_nesting(&layers, &cutting, &rules, verified, &tiles);
+    let report = validate_with_registration(
+        &layers,
+        &cutting,
+        &rules,
+        verified,
+        &layout.tiles,
+        &layout.anchors,
+    );
+
+    let mut messages: Vec<String> = report
+        .violations
+        .iter()
+        .map(|v| v.headline.clone())
+        .collect();
+    // Say what nesting changed. Without this the verdict would quietly improve
+    // for a layer that only fits once it is cut into tiles, and the reader would
+    // have no way to know the difference came from a decision nobody made.
+    messages.extend(layout.notes);
 
     Ok(ValidationResult {
         verdict: verdict_name(report.verdict).to_string(),
         error_count: report.counts.error,
         warning_count: report.counts.warning,
-        info_count: report.counts.info,
-        messages: report
-            .violations
-            .iter()
-            .map(|v| v.headline.clone())
-            .collect(),
+        info_count: report.counts.info + layout.nested.len(),
+        messages,
         limits_physically_verified: report.limits_physically_verified,
+        nested_layers: layout.nested,
     })
+}
+
+/// What a layout contributes to one validation run.
+///
+/// Its own type rather than a four-tuple, because each part is easy to mix up
+/// with another: tiles are per-layer rectangles, anchors are per-layer points,
+/// and passing the wrong pair of them silently turns T-15 back into a plotter
+/// check.
+struct Layout {
+    tiles: BTreeMap<u32, Vec<Rect4>>,
+    anchors: BTreeMap<u32, Point>,
+    /// Layers that were laid out, in the order they were visited.
+    nested: Vec<u32>,
+    /// One line per laid-out or refused layer, for the caller to show.
+    notes: Vec<String>,
+}
+
+impl Layout {
+    fn empty() -> Self {
+        Self {
+            tiles: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            nested: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
+/// Lay out every layer that does not fit the field, and report where each lands.
+///
+/// This is what puts geometry into the registration check. T-15 compares the
+/// plotter's own error against the worst spread between where two layers start,
+/// and "where a layer starts" only exists once the layer has been laid out. So
+/// the anchors are computed here, from the same `fixed_grid` the station uses —
+/// not read from the document. A document that declared its own anchors would
+/// make T-15 check a claim instead of a layout, which is the trap the bridge
+/// records avoided too.
+///
+/// Returns the tile rectangles and anchors for the validator, the layers that
+/// were laid out, and one note per layer for the caller to show.
+fn lay_out(layers: &[LayerInput], cutting: &CuttingProfile) -> Layout {
+    let request = NestRequest {
+        field_width_mm: cutting.limits.max_tile_width_mm,
+        field_length_mm: cutting.limits.max_tile_length_mm,
+        separation_gap_mm: cutting.limits.gap_mm,
+        kerf_mm: cutting.limits.kerf_mm,
+    };
+
+    let mut tiles: BTreeMap<u32, Vec<Rect4>> = BTreeMap::new();
+    let mut anchors: BTreeMap<u32, Point> = BTreeMap::new();
+    let mut nested: Vec<u32> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+
+    for layer in layers {
+        if !needs_nesting(&layer.geometry, request) {
+            continue;
+        }
+        match fixed_grid(&layer.geometry, request) {
+            Ok(plan) => {
+                nested.push(layer.index);
+                // Content rectangles, not the tile windows: the rule asks whether
+                // the cut material fits, and the CLI passes the same numbers.
+                tiles.insert(
+                    layer.index,
+                    plan.tiles
+                        .iter()
+                        .map(|t| {
+                            let (_, _, w, h) = mask_kernel::bounding_box(&t.content);
+                            [0.0, 0.0, w, h]
+                        })
+                        .collect(),
+                );
+                if let Some(first) = plan.tiles.first() {
+                    anchors.insert(
+                        layer.index,
+                        Point {
+                            x: first.marks.part_anchor.left.x_mm,
+                            y: first.marks.part_anchor.left.y_mm,
+                        },
+                    );
+                }
+                // Deliberately not worded like the field rule's own message: a
+                // note and a violation are the same list here, and a caller that
+                // greps for text must be able to tell a decision from a defect.
+                notes.push(format!(
+                    "Слой {}: шире поля ({:.0} мм) — разбит на {} плит{}, регистрация проверена по раскладке.",
+                    layer.index,
+                    cutting.limits.max_tile_width_mm,
+                    plan.summary.tile_count,
+                    plural(plan.summary.tile_count, "у", "и", ""),
+                ));
+            }
+            // A refused layout leaves the layer to be measured whole, which is
+            // what the field rule does without a plan: it will say the layer is
+            // too large, and that is the true state of a layer nobody could lay
+            // out.
+            Err(e) => notes.push(format!(
+                "Слой {}: вложение отказано ({e}) — слой измеряется целиком.",
+                layer.index
+            )),
+        }
+    }
+
+    Layout {
+        tiles,
+        anchors,
+        nested,
+        notes,
+    }
+}
+
+/// Russian plural for a tile count: 1 плитка, 2 плитки, 5 плиток.
+fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
+    match n % 10 {
+        1 if n % 100 != 11 => one.to_string(),
+        2..=4 if !(12..=14).contains(&(n % 100)) => few.to_string(),
+        _ => many.to_string(),
+    }
 }
 
 /// Measure one layer and return its geometry ready for drawing.
@@ -561,44 +739,6 @@ fn extract_bridges(layer: &serde_json::Value, index: u32) -> Result<Vec<BridgeRe
     Ok(raw)
 }
 
-/// Pull per-layer tile rectangles, when a nesting plan is present.
-fn extract_tiles(value: &serde_json::Value) -> std::collections::BTreeMap<u32, Vec<Rect4>> {
-    let mut map = std::collections::BTreeMap::new();
-    let Some(plans) = value
-        .get("nesting")
-        .and_then(|n| n.get("layers"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return map;
-    };
-
-    for plan in plans {
-        let Some(index) = plan.get("layer").and_then(serde_json::Value::as_u64) else {
-            continue;
-        };
-        let Some(tiles) = plan.get("tiles").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        let rects: Vec<Rect4> = tiles
-            .iter()
-            .filter_map(|t| t.get("bbox").and_then(serde_json::Value::as_array))
-            .filter(|a| a.len() == 4)
-            .filter_map(|a| {
-                Some([
-                    a[0].as_f64()?,
-                    a[1].as_f64()?,
-                    a[2].as_f64()?,
-                    a[3].as_f64()?,
-                ])
-            })
-            .collect();
-        if !rects.is_empty() {
-            map.insert(index as u32, rects);
-        }
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,7 +1018,27 @@ mod browser_reach {
     }
 
     fn validate(project_json: &str) -> ValidationResult {
-        validate_project_inner(project_json, MATERIAL, PLOTTER).expect("the document validates")
+        validate_project_inner(project_json, MATERIAL, PLOTTER, false)
+            .expect("the document validates")
+    }
+
+    fn validate_nested(project_json: &str) -> ValidationResult {
+        validate_project_inner(project_json, MATERIAL, PLOTTER, true)
+            .expect("the document validates")
+    }
+
+    /// A band too long for the working field, so nesting has something to do.
+    ///
+    /// The 284 mm field of `knife-25mm` is the limit, so a 900 mm band needs
+    /// four tiles and lands with its first one at a known place.
+    fn long_band(x: f64, y: f64) -> serde_json::Value {
+        serde_json::json!({
+            "outer": {
+                "points": [[x, y], [x + 900.0, y], [x + 900.0, y + 60.0], [x, y + 60.0]],
+                "closed": true
+            },
+            "holes": []
+        })
     }
 
     #[test]
@@ -916,11 +1076,12 @@ mod browser_reach {
     }
 
     #[test]
-    fn registration_measures_the_plotter_alone_and_never_the_geometry() {
-        // T-15 is `tool error + geometric spread`, and no registration anchor
-        // travels through this path, so the geometric half is always zero. The
+    fn registration_measures_the_plotter_alone_without_a_layout() {
+        // T-15 is `tool error + geometric spread`, and this call does not lay the
+        // project out, so no anchor exists and the geometric half is zero. The
         // profiles put the tool error at 0.30 mm against a 0.35 mm budget: the
-        // only way this can fail is the plotter, never the layers.
+        // only way this can fail is the plotter, never the layers. The laid-out
+        // path is `registration_sees_the_geometry_once_the_project_is_laid_out`.
         let clean = project(serde_json::json!([
             layer(1, "Base", square_at(0.0, 0.0, 40.0)),
             layer(2, "Detail", square_at(20.0, 20.0, 40.0))
@@ -936,7 +1097,7 @@ mod browser_reach {
         // which shows the rule is live rather than unreachable.
         let bad_plotter = PLOTTER.replace("0.30", "0.90");
         let report =
-            validate_project_inner(&clean, MATERIAL, &bad_plotter).expect("valid profiles");
+            validate_project_inner(&clean, MATERIAL, &bad_plotter, false).expect("valid profiles");
         assert!(
             report.messages.iter().any(|m| m.contains("не совместятся")),
             "the rule fires on the plotter budget: {:?}",
@@ -1027,14 +1188,11 @@ mod browser_reach {
     }
 
     #[test]
-    fn the_field_rule_falls_back_to_the_uncut_layer_in_the_browser() {
-        // `extract_tiles` reads `nesting.layers[].tiles[].bbox`, a shape that no
-        // schema defines, no fixture contains and no artifact produces — pinned
-        // here so the behaviour is a stated fact rather than an accident. The
-        // consequence is the safe direction: with no plan, the rule measures the
-        // whole layer, so a layer that would nest fine is reported as too large.
-        // That is an over-report, not a silent pass, which is why it did not
-        // become a defect on its own; see BUG-014 and BUG-016.
+    fn the_field_rule_measures_the_whole_layer_when_nobody_asked_for_a_layout() {
+        // Without a layout the field rule falls back to the uncut layer, which
+        // over-reports: a layer that nests fine is still reported as too large.
+        // That direction is safe, and it is the price of not deciding on the
+        // caller's behalf whether nesting happens.
         let too_wide = project(serde_json::json!([layer(
             1,
             "Base",
@@ -1046,10 +1204,129 @@ mod browser_reach {
             "a 400 mm layer on a 284 mm plotter must be reported: {:?}",
             result.messages
         );
+        assert!(
+            result.nested_layers.is_empty(),
+            "and nothing claims to have been laid out"
+        );
+    }
 
-        // A document that does carry the undocumented shape is honoured, so the
-        // contract is visible in one place instead of implied in two.
-        let nested = serde_json::json!({
+    #[test]
+    fn registration_sees_the_geometry_once_the_project_is_laid_out() {
+        // BUG-014, and the question asked directly: does T-15 see the geometry?
+        //
+        // Two layers, each longer than the field, placed 400 mm apart. Nested,
+        // they start in different places, so the bench worker must register one
+        // against the other; the plotter's own 0.30 mm fits the 0.35 mm budget on
+        // its own. Without a layout there is nothing to register, so the rule
+        // measures the plotter alone and stays quiet.
+        let apart = project(serde_json::json!([
+            layer(1, "Base", long_band(0.0, 0.0)),
+            layer(2, "Detail", long_band(0.0, 400.0))
+        ]));
+
+        let without_layout = validate(&apart);
+        assert!(
+            !without_layout
+                .messages
+                .iter()
+                .any(|m| m.contains("не совместятся")),
+            "without a layout there is no registration error to find: {:?}",
+            without_layout.messages
+        );
+
+        let laid_out = validate_nested(&apart);
+        assert_eq!(laid_out.nested_layers, vec![1, 2], "both layers are nested");
+        assert!(
+            laid_out
+                .messages
+                .iter()
+                .any(|m| m.contains("не совместятся")),
+            "T-15 must read the layout, not only the plotter: {:?}",
+            laid_out.messages
+        );
+    }
+
+    #[test]
+    fn layers_that_land_in_the_same_place_register_nothing() {
+        // The other half: a rule that fires for every nested project is as useless
+        // as one that never fires. Identical geometry lands identically, so there
+        // is no spread to absorb and T-15 stays quiet even though both layers
+        // were laid out.
+        let together = project(serde_json::json!([
+            layer(1, "Base", long_band(0.0, 0.0)),
+            layer(2, "Detail", long_band(0.0, 0.0))
+        ]));
+
+        let result = validate_nested(&together);
+        assert_eq!(result.nested_layers.len(), 2);
+        assert!(
+            !result.messages.iter().any(|m| m.contains("не совместятся")),
+            "two layers at one origin need no registration: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_single_nested_layer_has_nothing_to_register_against() {
+        // Registration is a disagreement between layers. One layer laid out on a
+        // sheet is aligned to itself, and reporting an error would be a defect
+        // invented by the rule.
+        let single = project(serde_json::json!([layer(1, "Base", long_band(0.0, 0.0))]));
+        let result = validate_nested(&single);
+        assert_eq!(result.nested_layers, vec![1]);
+        assert!(
+            !result.messages.iter().any(|m| m.contains("не совместятся")),
+            "one layer cannot disagree with itself: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn a_layout_that_succeeds_is_reported_rather_than_silently_better() {
+        // The verdict improves for a layer that only fits once it is cut, which is
+        // a decision somebody made. Both the layer list and a message say so, or
+        // a caller comparing the two verdicts would have no way to tell why they
+        // differ.
+        let wide = project(serde_json::json!([layer(
+            1,
+            "Base",
+            square_at(0.0, 0.0, 400.0)
+        )]));
+
+        let without_layout = validate(&wide);
+        assert!(
+            without_layout
+                .messages
+                .iter()
+                .any(|m| m.contains("рабочее поле")),
+            "an un-nested 400 mm layer does not fit: {:?}",
+            without_layout.messages
+        );
+
+        let laid_out = validate_nested(&wide);
+        assert_eq!(laid_out.nested_layers, vec![1]);
+        assert!(
+            !laid_out.messages.iter().any(|m| m.contains("рабочее поле")),
+            "a laid-out layer fits its tiles: {:?}",
+            laid_out.messages
+        );
+        assert!(
+            laid_out
+                .messages
+                .iter()
+                .any(|m| m.contains("шире поля") && m.contains("разбит на")),
+            "and the caller is told what happened: {:?}",
+            laid_out.messages
+        );
+    }
+
+    #[test]
+    fn a_document_cannot_declare_its_own_layout() {
+        // The trap the bridge records avoided, closed here as well: a document
+        // that claimed its tiles used to be read by `extract_tiles`, whose shape
+        // no schema defined and no artefact produced. The layout is computed now,
+        // so a claim is ignored rather than believed.
+        let claiming = serde_json::json!({
             "composition": { "layers": [{
                 "index": 1,
                 "name": "Base",
@@ -1060,11 +1337,16 @@ mod browser_reach {
                 "tiles": [{ "bbox": [0.0, 0.0, 200.0, 200.0] }]
             }]}
         });
-        let result = validate(&nested.to_string());
+
+        let result = validate(&claiming.to_string());
         assert!(
-            !result.messages.iter().any(|m| m.contains("рабочее поле")),
-            "a plan that fits silences the field rule: {:?}",
+            result.messages.iter().any(|m| m.contains("рабочее поле")),
+            "a claimed layout is not a layout: {:?}",
             result.messages
+        );
+        assert!(
+            result.nested_layers.is_empty(),
+            "and nothing claims to have been laid out"
         );
     }
 
