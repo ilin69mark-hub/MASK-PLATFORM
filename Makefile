@@ -67,7 +67,7 @@ web-contract: wasm-runtime ## Check the TS facade against the real kernel
 
 .PHONY: web-test
 web-test: wasm-runtime ## Run the web tests against the real wasm artifact
-	cd $(ROOT)/web && node --experimental-strip-types --test "tests/*.test.ts"
+	cd $(ROOT)/web && node --import ./tests/register-tsx.mjs --experimental-strip-types --test "tests/*.test.ts"
 
 .PHONY: wasm-dist
 wasm-dist: ## Build the browser bundle into web/public/pkg

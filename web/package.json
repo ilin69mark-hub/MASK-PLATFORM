@@ -10,7 +10,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test \"tests/*.test.ts\"",
+    "test": "node --import ./tests/register-tsx.mjs --experimental-strip-types --test \"tests/*.test.ts\"",
     "kernel:dist": "cd .. && make wasm-dist  # wasm-pack comes from cargo, not from npm",
     "kernel:check": "node scripts/kernel-contract-check.mjs"
   },
