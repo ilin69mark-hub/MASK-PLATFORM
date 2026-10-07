@@ -31,7 +31,7 @@ pub use corner::{
 };
 pub use gap::{gaps_per_region, min_gap, Gap};
 pub use geom::{ArcSegment, Contour, GeometryError, Point, Shape, Shapes};
-pub use hash::{hash_json, ContentHash, HASH_SCHEME_VERSION};
+pub use hash::{ContentHash, HASH_SCHEME_VERSION};
 pub use integrity::{open_cut_contours, self_intersections, OpenContour, SelfIntersection};
 pub use measure::{
     bounding_box, contour_perimeter, format_area, format_degrees, format_measurement, has_curves,

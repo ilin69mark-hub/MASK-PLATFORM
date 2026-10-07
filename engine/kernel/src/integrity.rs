@@ -187,11 +187,16 @@ pub fn open_cut_contours(shapes: &Shapes) -> Vec<OpenContour> {
 /// Two different numbers from the same contour, which is what makes a
 /// self-intersection detectable without a full topological analysis: a simple
 /// polygon gives the same answer either way, and a crossed one cannot.
+///
+/// This is available to tests because its only current use is a boundary test. It is
+/// not part of the public geometry contract.
+#[cfg(test)]
 #[must_use]
-pub fn area_disagreement(contour: &Contour) -> f64 {
+pub(crate) fn area_disagreement(contour: &Contour) -> f64 {
     (signed_area(contour) - even_odd_area(contour)).abs()
 }
 
+#[cfg(test)]
 fn signed_area(contour: &Contour) -> f64 {
     let points = &contour.points;
     if points.len() < 3 {
@@ -210,6 +215,7 @@ fn signed_area(contour: &Contour) -> f64 {
 
 /// Scanline even-odd area: count crossings of a vertical line, alternate inside
 /// and out.
+#[cfg(test)]
 fn even_odd_area(contour: &Contour) -> f64 {
     let points = &contour.points;
     let n = points.len();

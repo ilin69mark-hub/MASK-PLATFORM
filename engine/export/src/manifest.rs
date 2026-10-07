@@ -5,7 +5,7 @@
 //! are intact. It is generated from the same data the validator used, never from
 //! anything typed in by hand.
 
-use crate::{layer_stem, sha256_hex};
+use crate::layer_stem;
 use mask_kernel::{Point, Shapes};
 use mask_profiles::{MaterialProfile, PlotterProfile};
 use mask_rules::CuttingProfile;
@@ -282,16 +282,6 @@ fn verdict_str(report: &ValidationReport) -> String {
         mask_validate::Verdict::Fatal => "FATAL",
     }
     .to_string()
-}
-
-/// Hash of the manifest itself, computed over the canonical bytes.
-#[must_use]
-pub fn manifest_hash(manifest: &Value) -> String {
-    sha256_hex(
-        serde_json::to_string(manifest)
-            .unwrap_or_default()
-            .as_bytes(),
-    )
 }
 
 /// Registration geometry for the DXF layer: the two anchor pairs as thin lines.

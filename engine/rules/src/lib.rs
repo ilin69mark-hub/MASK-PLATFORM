@@ -232,8 +232,12 @@ pub struct Rule {
 
 impl Rule {
     /// Look up the numeric threshold for this rule.
+    ///
+    /// This is available to tests because its current use is rule tests. It is not
+    /// part of the public rule contract.
+    #[cfg(test)]
     #[must_use]
-    pub fn threshold_value(&self, limits: &EffectiveLimits) -> f64 {
+    pub(crate) fn threshold_value(&self, limits: &EffectiveLimits) -> f64 {
         match self.threshold.as_str() {
             "line_width_mm" => limits.line_width_mm,
             "gap_mm" => limits.gap_mm,

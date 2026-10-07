@@ -99,19 +99,6 @@ fn json_string(value: &str) -> String {
     format!("\"{value}\"")
 }
 
-/// Hash any serialisable value using the same convention.
-///
-/// Keys are sorted so that field order in a struct never changes the hash.
-pub fn hash_json<T: serde::Serialize>(value: &T) -> ContentHash {
-    let json = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-    let canonical = serde_json::to_string(&parsed).unwrap_or_else(|_| "null".to_string());
-    ContentHash {
-        scheme: HASH_SCHEME_VERSION,
-        digest: ContentHash::digest_bytes(canonical.as_bytes()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

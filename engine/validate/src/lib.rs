@@ -14,17 +14,13 @@ use mask_kernel::{
     bounding_box, format_area, format_degrees, format_measurement, has_curves, intersection,
     meets_threshold, min_corner_radius, min_gap, min_width, narrowest_neck, open_cut_contours,
     self_intersections, shape_area, shapes_area, sharp_corners, shortest_edge_in,
-    unanchored_islands, Contour, Point, Shape, Shapes,
+    unanchored_islands, Point, Shapes,
 };
+#[cfg(test)]
+use mask_kernel::{Contour, Shape};
 use mask_rules::{CuttingProfile, RuleSet, Severity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-#[derive(Debug, thiserror::Error)]
-pub enum ValidationError {
-    #[error("geometry is invalid: {0}")]
-    Geometry(String),
-}
 
 /// One problem found in the project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1522,8 +1518,16 @@ pub fn render(report: &ValidationReport) -> String {
 }
 
 /// Convenience: build a layer input from simple contour rings.
+///
+/// This is available to tests because its current use is validator tests. It is
+/// not part of the public input contract.
+#[cfg(test)]
 #[must_use]
-pub fn layer_from_contours(index: u32, name: &str, contours: Vec<Vec<[f64; 2]>>) -> LayerInput {
+pub(crate) fn layer_from_contours(
+    index: u32,
+    name: &str,
+    contours: Vec<Vec<[f64; 2]>>,
+) -> LayerInput {
     let shapes = contours
         .into_iter()
         .map(|pts| {
