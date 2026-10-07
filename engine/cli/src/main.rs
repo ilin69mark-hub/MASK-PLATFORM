@@ -34,6 +34,7 @@ struct WrittenArtifact {
     tile: Option<String>,
 }
 
+#[derive(Debug)]
 struct Args {
     fixture: PathBuf,
     material: PathBuf,
@@ -246,6 +247,15 @@ OPTIONS
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_command_args(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+
+/// Parse production-run arguments without reading the process environment.
+///
+/// The split exists so invalid invocations can be tested directly. A usage
+/// error is user input, not a runtime failure, and it should be provable
+/// without spawning the binary.
+fn parse_command_args(argv: &[String]) -> Result<Args, String> {
     let mut fixture = None;
     let mut material = None;
     let mut plotter = None;
@@ -256,7 +266,6 @@ fn parse_args() -> Result<Args, String> {
     let mut bridge = false;
     let mut round = false;
 
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
@@ -1424,6 +1433,200 @@ mod fixture_expectations {
             failures.len(),
             fixture_paths().len(),
             failures.join("\n  - ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod cli_boundaries {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
+    fn centreline_layer() -> FixtureLayer {
+        FixtureLayer {
+            index: 1,
+            name: "Centreline".to_string(),
+            application_order: None,
+            width_mm: 1.0,
+            centrelines: vec![vec![[0.0, 0.0], [10.0, 0.0]]],
+            regions: Vec::new(),
+        }
+    }
+
+    fn square_region() -> FixtureRegion {
+        FixtureRegion {
+            outer: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            holes: Vec::new(),
+        }
+    }
+
+    fn region_layer() -> FixtureLayer {
+        FixtureLayer {
+            index: 1,
+            name: "Region".to_string(),
+            application_order: None,
+            width_mm: 1.0,
+            centrelines: Vec::new(),
+            regions: vec![square_region()],
+        }
+    }
+
+    fn fixture_with_region(region: FixtureRegion) -> Fixture {
+        Fixture {
+            project_id: "TEST-CLI-001".to_string(),
+            revision: 1,
+            target: FixtureTarget::default(),
+            layers: vec![FixtureLayer {
+                index: 1,
+                name: "Source".to_string(),
+                application_order: None,
+                width_mm: 1.0,
+                centrelines: Vec::new(),
+                regions: vec![region],
+            }],
+            expect: Expect {
+                outcome: ExpectOutcome::Rejected,
+                verdict: None,
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn production_arguments_parse_with_defaults() {
+        let args = parse_command_args(&argv(&[
+            "--fixture",
+            "fixture.json",
+            "--material",
+            "material.json",
+            "--plotter",
+            "plotter.json",
+        ]))
+        .expect("required arguments");
+
+        assert_eq!(args.fixture, PathBuf::from("fixture.json"));
+        assert_eq!(args.material, PathBuf::from("material.json"));
+        assert_eq!(args.plotter, PathBuf::from("plotter.json"));
+        assert_eq!(args.out_dir, PathBuf::from("out"));
+        assert_eq!(args.widen_to, None);
+        assert!(!args.nest && !args.bridge && !args.round && !args.export_anyway);
+    }
+
+    #[test]
+    fn production_flags_and_options_are_recorded() {
+        let args = parse_command_args(&argv(&[
+            "--fixture",
+            "fixture.json",
+            "--material",
+            "material.json",
+            "--plotter",
+            "plotter.json",
+            "--out",
+            "proof",
+            "--widen-to",
+            "0.8",
+            "--nest",
+            "--bridge",
+            "--round-corners",
+            "--export-anyway",
+        ]))
+        .expect("flags and options");
+
+        assert_eq!(args.out_dir, PathBuf::from("proof"));
+        assert_eq!(args.widen_to, Some(0.8));
+        assert!(args.nest && args.bridge && args.round && args.export_anyway);
+    }
+
+    #[test]
+    fn malformed_production_arguments_identify_the_problem() {
+        let required = ["--fixture", "--material", "--plotter"];
+        for (index, flag) in required.iter().enumerate() {
+            let mut supplied = Vec::new();
+            for (position, name) in ["fixture", "material", "plotter"].iter().enumerate() {
+                let value = format!("{name}.json");
+                if position != index {
+                    supplied.push(flag.to_string());
+                    supplied.push(value);
+                }
+            }
+            let error = parse_command_args(&supplied).expect_err("a required path");
+            assert!(
+                error.contains("is required"),
+                "missing {flag} should name the missing input: {error}"
+            );
+        }
+
+        let error = parse_command_args(&argv(&["--widen-to"])).expect_err("a missing value");
+        assert!(error.contains("needs a value"), "{error}");
+
+        let error = parse_command_args(&argv(&["--widen-to", "wide"])).expect_err("a number");
+        assert!(error.contains("expects a number"), "{error}");
+
+        let error = parse_command_args(&argv(&["--sharpen"])).expect_err("an unknown option");
+        assert!(error.contains("unknown argument"), "{error}");
+    }
+
+    #[test]
+    fn help_reports_usage() {
+        let error = parse_command_args(&argv(&["--help"])).expect_err("help is not a run");
+        assert!(error.contains("USAGE"), "{error}");
+    }
+
+    #[test]
+    fn a_layer_may_use_centrelines_or_regions_but_not_both() {
+        let mut layer = centreline_layer();
+        layer.regions.push(square_region());
+
+        let error = build_layer(&layer, None, None).expect_err("ambiguous stroke width");
+        assert!(
+            error.contains("either centrelines or regions, not both"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn finished_regions_are_not_rewidened() {
+        let error = build_layer(&region_layer(), Some(0.8), None).expect_err("a moved boundary");
+        assert!(
+            error.contains("--widen-to does not apply to regions"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn region_outlines_require_a_triangle() {
+        let short = region_to_shape(&FixtureRegion {
+            outer: vec![[0.0, 0.0], [10.0, 0.0]],
+            holes: Vec::new(),
+        })
+        .expect_err("a segment is not a region");
+        assert!(short.contains("at least three points"), "{short}");
+
+        let shape = region_to_shape(&square_region()).expect("a triangle is a region");
+        assert_eq!(shape.outer.points.len(), 4);
+        assert!(shape.outer.closed);
+    }
+
+    #[test]
+    fn a_self_crossing_source_is_named_before_any_merge() {
+        let bowtie = FixtureRegion {
+            outer: vec![[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]],
+            holes: Vec::new(),
+        };
+        let fixture = fixture_with_region(bowtie);
+
+        let problems = check_source_integrity(&fixture).expect_err("a bow tie is not one region");
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].contains("crosses itself")
+                && problems[0].contains("L01")
+                && problems[0].contains("region 1"),
+            "{}",
+            problems[0]
         );
     }
 }
