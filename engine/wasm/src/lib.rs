@@ -508,6 +508,165 @@ pub struct RepairResult {
     pub bridges: Vec<BridgeRecord>,
 }
 
+/// One edit to a vertex, as the editor sends it.
+///
+/// Indices rather than a copy of the geometry: the editor already holds the shape
+/// set it drew, and sending the whole thing back to move one point would make
+/// every keystroke a full serialisation of the layer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VertexEdit {
+    /// Index into `Shapes::shapes`.
+    pub shape: usize,
+    /// 0 for the outer contour, 1.. for its holes, in `Shape::contours()` order.
+    pub contour: usize,
+    /// Index into the contour's points.
+    pub vertex: usize,
+    pub x_mm: f64,
+    pub y_mm: f64,
+}
+
+/// What one edit produced: the geometry to keep, and its measurement.
+///
+/// Both, because the editor needs each for a different thing. The canonical
+/// `shapes` go back into state so the next edit addresses the same vertex indices
+/// — rebuilding the layer from `path_data` instead would renumber every contour,
+/// and a hit-test would then start grabbing the wrong vertex. The measurement
+/// comes back with it so the numbers on screen belong to the geometry that will be
+/// validated, rather than to whatever the editor last remembered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditResult {
+    pub shapes: Shapes,
+    pub measured: LayerResult,
+}
+
+/// Move one vertex and return the geometry to draw and to measure.
+///
+/// The edit is applied inside the kernel and nowhere else. That is the whole point
+/// of routing it here rather than assigning into a TypeScript array: the canonical
+/// grid (ADR-0004) is the kernel's, the bounds are the kernel's, and a move that
+/// collapses a contour below three points is refused by the same code that would
+/// have refused it on the way in through `validate_strict`. An editor that edited
+/// coordinates itself would produce geometry the station's canonical hash could
+/// not reproduce.
+///
+/// The result is measured rather than merely returned, so the editor gets the
+/// numbers for the shape it just changed in the same call — the number shown must
+/// be the number of the geometry that will be validated.
+#[wasm_bindgen]
+pub fn move_vertex(shapes_json: &str, edit: JsValue) -> Result<JsValue, JsValue> {
+    let edit: VertexEdit = serde_wasm_bindgen::from_value(edit)
+        .map_err(|e| into_js(JsError::new(format!("edit: {e}"))))?;
+    to_js(&move_vertex_inner(shapes_json, edit).map_err(into_js)?)
+}
+
+/// Typed vertex move, callable from Rust tests.
+///
+/// Takes the parsed edit rather than a `JsValue`, because `serde_wasm_bindgen`
+/// cannot run off the wasm target, and a write path with no host test is a write
+/// path nobody checks. The split is the same one `validate_project_inner` has.
+fn move_vertex_inner(shapes_json: &str, edit: VertexEdit) -> Result<EditResult, JsError> {
+    let mut shapes: Shapes = parse(shapes_json, "shapes")?;
+
+    if edit.shape >= shapes.shapes.len() {
+        return Err(JsError::new(format!(
+            "edit: shape {} does not exist; the layer has {}",
+            edit.shape,
+            shapes.shapes.len()
+        )));
+    }
+
+    // Contour 0 is the outer contour and contour n is the n-th hole, which is the
+    // order `Shape::contours()` yields and the order the editor numbers them in.
+    {
+        let shape = &mut shapes.shapes[edit.shape];
+        let contours = 1 + shape.holes.len();
+        if edit.contour >= contours {
+            return Err(JsError::new(format!(
+                "edit: contour {} does not exist; shape {} has {}",
+                edit.contour, edit.shape, contours
+            )));
+        }
+        // Read before the mutable borrow: whether the contour is closed decides if
+        // the last point is a neighbour of the first.
+        let closed = match edit.contour {
+            0 => shape.outer.closed,
+            n => shape.holes[n - 1].closed,
+        };
+        let points = match edit.contour {
+            0 => &mut shape.outer.points,
+            n => &mut shape.holes[n - 1].points,
+        };
+        if edit.vertex >= points.len() {
+            return Err(JsError::new(format!(
+                "edit: vertex {} does not exist; the contour has {}",
+                edit.vertex,
+                points.len()
+            )));
+        }
+        // Rejected here rather than left to `validate_strict`, because the reason is
+        // worth naming and because the alternative is silent data loss: a move that
+        // duplicates a neighbour is the normal way an editor produces a
+        // zero-length edge, and `canonicalise` answers that by dropping the
+        // duplicate. The user would watch a vertex vanish with no message at all.
+        //
+        // Every neighbour is checked, not just the next one. The previous is where
+        // a drag lands most often, since it approaches the vertex from that side,
+        // and on a closed contour the last point is also a neighbour of the first.
+        let len = points.len();
+        let mut neighbours: Vec<usize> = Vec::with_capacity(2);
+        if edit.vertex > 0 {
+            neighbours.push(edit.vertex - 1);
+        }
+        if edit.vertex + 1 < len {
+            neighbours.push(edit.vertex + 1);
+        }
+        if closed && len > 2 && edit.vertex == 0 {
+            neighbours.push(len - 1);
+        }
+
+        let target = quantised(&edit);
+        for n in &neighbours {
+            let Some(point) = points.get(*n) else {
+                continue;
+            };
+            let neighbour = mask_kernel::canonical::quantise_point(Point {
+                x: point.x,
+                y: point.y,
+            });
+            if neighbour == target {
+                return Err(JsError::new(format!(
+                    "edit: vertex {} would land on vertex {n}; move it somewhere else",
+                    edit.vertex
+                )));
+            }
+        }
+        points[edit.vertex] = to_point(edit.x_mm, edit.y_mm)?;
+    }
+
+    // Canonicalise before validating, so the result is the geometry the kernel
+    // would have produced from the same intent on the server.
+    let shapes = mask_kernel::canonicalise_shapes(&shapes);
+    shapes
+        .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| JsError::new(format!("edit: {e}")))?;
+
+    let measured = measure_layer_inner(
+        &serde_json::to_string(&shapes).map_err(|e| JsError::new(e.to_string()))?,
+    )?;
+    Ok(EditResult { shapes, measured })
+}
+
+fn to_point(x: f64, y: f64) -> Result<Point, JsError> {
+    Point::new(x, y, mask_kernel::MAX_COORDINATE_MM).map_err(|e| JsError::new(format!("edit: {e}")))
+}
+
+fn quantised(edit: &VertexEdit) -> Point {
+    mask_kernel::canonical::quantise_point(Point {
+        x: edit.x_mm,
+        y: edit.y_mm,
+    })
+}
+
 /// Add tabs to every island that is not attached to the surrounding film.
 ///
 /// This is the browser half of `maskctl --bridge`. Without it the editor cannot
@@ -1672,6 +1831,193 @@ mod consistency_tests {
             content_hash(&serde_json::to_string(&shapes).expect("json")).expect("hash");
         let from_kernel = mask_kernel::ContentHash::of(&shapes);
         assert_eq!(from_editor, from_kernel.to_string());
+    }
+}
+
+#[cfg(test)]
+mod editing {
+    //! The editor's write path: a vertex moves, and everything downstream of that
+    //! — canonical form, bounds, degenerate contours — is the kernel's decision
+    //! rather than TypeScript's.
+
+    use super::*;
+    use serde_json::json;
+
+    fn square_json() -> String {
+        json!({
+            "shapes": [{
+                "outer": { "points": [[0.0,0.0],[10.0,0.0],[10.0,5.0],[0.0,5.0]], "closed": true },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    /// The path data after a move, which is what the editor draws.
+    fn path_after(
+        shapes_json: &str,
+        shape: usize,
+        contour: usize,
+        vertex: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<String, JsError> {
+        let result = move_vertex_inner(
+            shapes_json,
+            VertexEdit {
+                shape,
+                contour,
+                vertex,
+                x_mm: x,
+                y_mm: y,
+            },
+        )?;
+        Ok(result
+            .measured
+            .path_data
+            .first()
+            .cloned()
+            .expect("the shape still has a contour"))
+    }
+
+    #[test]
+    fn a_vertex_moves_and_the_result_is_measured() {
+        // The number shown must belong to the shape that was just changed, so the
+        // move returns a measurement rather than geometry the editor must re-measure.
+        let moved = path_after(&square_json(), 0, 0, 1, 12.0, 0.0).expect("move");
+        assert!(
+            moved.starts_with("M 0.0000 0.0000 L 12.0000 0.0000"),
+            "the path must start from the moved vertex, got {moved}"
+        );
+
+        let result = move_vertex_inner(
+            &square_json(),
+            VertexEdit {
+                shape: 0,
+                contour: 0,
+                vertex: 1,
+                x_mm: 12.0,
+                y_mm: 0.0,
+            },
+        )
+        .expect("move");
+        assert!(
+            (result.measured.bbox[2] - 12.0).abs() < 1e-9,
+            "the bounding box must follow the move, got {}",
+            result.measured.bbox[2]
+        );
+    }
+
+    #[test]
+    fn a_move_lands_on_the_canonical_grid_not_where_the_mouse_was() {
+        // ADR-0004: coordinates live on a 1e-4 mm grid. A pointer reports 12.000049
+        // and the stored coordinate is 12.0000, because the geometry is what gets
+        // hashed and a coordinate off the grid would produce a hash the server
+        // cannot reproduce.
+        let moved = path_after(&square_json(), 0, 0, 1, 12.000049, 0.0).expect("move");
+        assert!(
+            moved.contains("L 12.0000 0.0000"),
+            "off-grid coordinates must be quantised, got {moved}"
+        );
+    }
+
+    #[test]
+    fn a_vertex_cannot_be_dropped_onto_its_neighbour() {
+        // The ordinary way an editor produces a zero-length edge. Refused by name,
+        // because "contour needs at least 3 distinct points" describes the
+        // consequence and not the mistake.
+        let err = path_after(&square_json(), 0, 0, 1, 0.0, 0.0).expect_err("a duplicate point");
+        assert!(
+            err.message.contains("would land on vertex"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn an_index_outside_the_geometry_is_refused_with_the_size() {
+        for (shape, contour, vertex, expected) in [
+            (7usize, 0usize, 0usize, "shape 7 does not exist"),
+            (0, 3, 0, "contour 3 does not exist"),
+            (0, 0, 9, "vertex 9 does not exist"),
+        ] {
+            let err = path_after(&square_json(), shape, contour, vertex, 1.0, 1.0)
+                .expect_err("an index that does not exist");
+            assert!(
+                err.message.contains(expected),
+                "expected {expected:?}, got {:?}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_outside_the_coordinate_bound_is_refused_not_clamped() {
+        // Clamping would produce a vertex the user did not place, in a mask that
+        // gets cut. The move fails and the layer stays as it was.
+        let err = path_after(&square_json(), 0, 0, 1, 1e9, 0.0).expect_err("out of bounds");
+        assert!(
+            err.message.contains("edit:"),
+            "the refusal must name the edit, got {:?}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_move_that_collapses_the_contour_is_refused() {
+        // Three points, and the move takes two of them onto each other.
+        let triangle = json!({
+            "shapes": [{
+                "outer": { "points": [[0.0,0.0],[8.0,0.0],[0.0,8.0]], "closed": true },
+                "holes": []
+            }]
+        })
+        .to_string();
+        let err = path_after(&triangle, 0, 0, 1, 0.0, 0.0).expect_err("a collapsed contour");
+        assert!(
+            err.message.contains("would land on vertex") || err.message.contains("edit:"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_hole_vertex_moves_too() {
+        // The editor numbers holes after the outer contour, so contour 1 is the
+        // first hole. Getting that index wrong would move the wrong boundary, and
+        // it would look plausible on screen.
+        let with_hole = json!({
+            "shapes": [{
+                "outer": { "points": [[0.0,0.0],[20.0,0.0],[20.0,20.0],[0.0,20.0]], "closed": true },
+                "holes": [{
+                    "points": [[5.0,5.0],[5.0,15.0],[15.0,15.0],[15.0,5.0]],
+                    "closed": true
+                }]
+            }]
+        })
+        .to_string();
+
+        let result = move_vertex_inner(
+            &with_hole,
+            VertexEdit {
+                shape: 0,
+                contour: 1,
+                vertex: 1,
+                x_mm: 5.0,
+                y_mm: 18.0,
+            },
+        )
+        .expect("move");
+        assert_eq!(
+            result.measured.path_data.len(),
+            2,
+            "outer contour and one hole"
+        );
+        assert!(
+            result.measured.path_data[1].contains("L 5.0000 18.0000"),
+            "the hole must be the thing that moved, got {}",
+            result.measured.path_data[1]
+        );
     }
 }
 
