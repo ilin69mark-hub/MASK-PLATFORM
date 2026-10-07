@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  letterbox,
   mmPerPixel,
   mmToPx,
   pxRadiusToMm,
@@ -47,18 +48,78 @@ test("millimetres and pixels convert both ways", () => {
 
 test("a viewBox away from the origin maps correctly", () => {
   // The reason `bbox` started reporting a real origin (BUG-018): with the view at
-  // 812…908, pixel 0 is 812 mm, and a conversion that assumed zero would put every
-  // hit-test 812 mm off.
+  // 812…908, the left edge of the *content* is 812 mm.
+  //
+  // This test used to assert that pixel 0 was 812 mm, which is wrong whenever the
+  // viewBox is not the same shape as the element drawing it — 96×72 into a square
+  // box letterboxes horizontally, so the content starts 83 px in. It passed by
+  // encoding the bug this change fixes, which is why it is written out now rather
+  // than left alone: the offset is not decoration.
   const { view, drawn } = box({ minX: 812, minY: 640, w: 96, h: 72 });
-  const mm = pxToMm({ x: 0, y: 0 }, view, drawn);
-  assert.ok(Math.abs(mm.x - 812) < 1e-9);
-  assert.ok(Math.abs(mm.y - 640) < 1e-9);
+  const { offsetX, offsetY } = letterbox(view, drawn);
+  // Height binds, so the content is 667 px wide inside a 500 px box: it
+  // overflows to both sides and pixel 0 is 12 mm *inside* the drawing, not at
+  // its left edge.
+  assert.ok(Math.abs(offsetY) < 1e-9, "the height fills the box, so no vertical margin");
+  assert.ok(offsetX < 0, `horizontal margin is negative: ${offsetX}`);
+
+  // The origin sits at the viewBox's own edge, wherever that lands on screen.
+  const origin = pxToMm({ x: offsetX, y: offsetY }, view, drawn);
+  assert.ok(Math.abs(origin.x - 812) < 1e-9, `x was ${origin.x}`);
+  assert.ok(Math.abs(origin.y - 640) < 1e-9, `y was ${origin.y}`);
+
+  // Pixel 0 is inside the drawing, past the left edge — the 12 mm that the old
+  // conversion silently dropped on every hit-test.
+  const atPixel0 = pxToMm({ x: 0, y: 0 }, view, drawn);
+  assert.ok(
+    Math.abs(atPixel0.x - 824) < 1e-9,
+    `pixel 0 should be 824 mm, not the viewBox's 812: got ${atPixel0.x}`
+  );
+
+  // A square viewBox in a square box has no margin, and that is the case the old
+  // assertion was really written for.
+  const square = box({ minX: 812, minY: 640, w: 96, h: 96 });
+  const squareOrigin = pxToMm({ x: 0, y: 0 }, square.view, square.drawn);
+  assert.ok(Math.abs(squareOrigin.x - 812) < 1e-9);
+  assert.ok(Math.abs(squareOrigin.y - 640) < 1e-9);
 });
 
 test("a box that has not been laid out yet does not divide by zero", () => {
   const { view, drawn } = box({}, { width: 0, height: 0 });
   assert.equal(mmPerPixel(view, drawn), 1);
   assert.deepEqual(pxToMm({ x: 3, y: 4 }, view, drawn), { x: 3, y: 4 });
+});
+
+test("a viewBox letterboxed in a taller box is centred, not left-aligned", () => {
+  // The offset is the subtle half of the letterbox rule. A wide viewBox in a
+  // square box scales down to fit the width and leaves a margin above and
+  // below; pixel 0 is *not* the viewBox's minY. A conversion that ignored the
+  // offset put every hit-test half a margin off, which reads as "the tool
+  // grabs the wrong vertex" rather than as a maths error.
+  const { view, drawn } = box({ minX: 10, minY: 20, w: 100, h: 50 }, { width: 400, height: 400 });
+  // Height binds: 50 mm into 400 px is 0.125 mm/px, so the content is
+  // 800 px wide and 400 px tall — 200 px of margin on the left and right.
+  const centre = pxToMm({ x: 200, y: 200 }, view, drawn);
+  assert.ok(Math.abs(centre.x - 60) < 1e-9, `x was ${centre.x}`);
+  assert.ok(Math.abs(centre.y - 45) < 1e-9, `y was ${centre.y}`);
+
+  // The centre of the box is the centre of the viewBox, and that holds only
+  // when the offset is accounted for.
+  const back = mmToPx({ x: 60, y: 45 }, view, drawn);
+  assert.ok(Math.abs(back.x - 200) < 1e-9 && Math.abs(back.y - 200) < 1e-9);
+});
+
+test("a letterboxed viewBox still round-trips a vertex on screen", () => {
+  // The failure this guards: hit-testing a real vertex in the middle of a
+  // letterboxed canvas. The vertex's pixel position and the pixel converted
+  // back to millimetres must be the same point.
+  const { view, drawn } = box({ minX: 812, minY: 640, w: 200, h: 100 }, { width: 500, height: 500 });
+  const vertex = { x: 900, y: 700 };
+  const px = mmToPx(vertex, view, drawn);
+  assert.ok(px.x >= 0 && px.x <= 500 && px.y >= 0 && px.y <= 500, `${JSON.stringify(px)} is on screen`);
+  const back = pxToMm(px, view, drawn);
+  assert.ok(Math.abs(back.x - vertex.x) < 1e-9);
+  assert.ok(Math.abs(back.y - vertex.y) < 1e-9);
 });
 
 test("a grab radius in pixels becomes millimetres at this scale", () => {

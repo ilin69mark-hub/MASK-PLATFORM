@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type Crossing,
@@ -10,6 +10,22 @@ import {
   loadKernel,
   measure,
 } from "@/lib/kernel";
+import {
+  type DrawnSizePx,
+  type Point2D,
+  pxRadiusToMm,
+  pxToMm,
+} from "@/lib/editor/viewTransform";
+import {
+  beginDrag,
+  editFor,
+  idleDrag,
+  moveDrag,
+  shouldCommit,
+  type DragState,
+} from "@/lib/editor/dragEdit";
+import { hitVertex } from "@/lib/editor/hitTest";
+import { NodeTool } from "@/components/NodeTool";
 import {
   type MeasurementState,
   belowMinimum,
@@ -59,6 +75,10 @@ export interface StudioProps {
   canRedo?: boolean;
   /** One vertex move, applied by the owner through the kernel. */
   onEdit?: (edit: VertexEdit) => void;
+  /** A drag began: the owner snapshots the geometry for undo. */
+  onDragBegin?: () => void;
+  /** The drag ended: the owner clears the snapshot. */
+  onDragEnd?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
 }
@@ -84,14 +104,11 @@ export function StudioCanvas({
   canUndo = false,
   canRedo = false,
   onEdit,
+  onDragBegin,
+  onDragEnd,
   onUndo,
   onRedo,
 }: StudioProps) {
-  // The Node tool (Phase 2) will call `onEdit` from SVG pointer events.
-  // Until then the callback is accepted and held by the owner: the write path
-  // `owner → moveVertex → setShapes` already exists and is covered by
-  // `applyEdit` unit tests plus the `move_vertex` kernel contract check.
-  void onEdit;
   const [mode, setMode] = useState<ViewMode>("mask");
   const [kernelReady, setKernelReady] = useState(false);
   const [measurement, setMeasurement] = useState<Measurement>({ status: "idle" });
@@ -171,6 +188,150 @@ export function StudioCanvas({
     };
   }, [ready]);
 
+  // The Node tool: off until toggled (hotkey A). While on, vertices are
+  // drawn and draggable, and each committed drag calls `onEdit`. Defined
+  // after `view`, since the pixel↔mm mapping needs it.
+  const [nodeTool, setNodeTool] = useState(false);
+  const [drawn, setDrawn] = useState<DrawnSizePx>({ width: 0, height: 0 });
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [drag, setDrag] = useState<DragState>(idleDrag());
+  const [pointerMm, setPointerMm] = useState<Point2D | null>(null);
+  const dragRef = useRef<DragState>(idleDrag());
+  dragRef.current = drag;
+  const lastMmRef = useRef<Point2D | null>(null);
+  const nodeToolRef = useRef(nodeTool);
+  nodeToolRef.current = nodeTool;
+
+  // Measure the element the viewBox is drawn into, so pointer pixels
+  // convert to millimetres against the real letterbox. The size is the
+  // container's, not the viewBox's, and it changes with the window.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const measure = () => {
+      const rect = svg.getBoundingClientRect();
+      setDrawn({ width: rect.width, height: rect.height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(svg);
+    return () => observer.disconnect();
+  }, [kernelReady, view.minX, view.minY, view.w, view.h]);
+
+  // Hotkey A toggles the Node tool. The tool is the only way to edit
+  // geometry, so its shortcut is a single letter rather than a modifier
+  // chord. Ignored while typing in a text field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "a" && e.key !== "A") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA")
+      ) {
+        return;
+      }
+      setNodeTool((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Pixel radius of the vertex grab target, turned into mm at the current
+  // scale and letterbox factor.
+  const grabRadiusMm = pxRadiusToMm(6, view, drawn);
+
+  // Convert a pointer event to millimetres inside the viewBox, against the
+  // element's real size and its letterbox.
+  const toMm = useCallback(
+    (clientX: number, clientY: number): Point2D | null => {
+      const svg = svgRef.current;
+      if (!svg) return null;
+      const rect = svg.getBoundingClientRect();
+      const box: DrawnSizePx = { width: rect.width, height: rect.height };
+      return pxToMm(
+        { x: clientX - rect.left, y: clientY - rect.top },
+        view,
+        box
+      );
+    },
+    [view]
+  );
+
+  const handleNodePointerDown = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      if (!nodeToolRef.current) return;
+      const at = toMm(e.clientX, e.clientY);
+      if (!at) return;
+      const grabbed = hitVertex(shapes, at, { radiusMm: grabRadiusMm });
+      const next = beginDrag(grabbed);
+      setDrag(next);
+      dragRef.current = next;
+      lastMmRef.current = at;
+      setPointerMm(at);
+      if (grabbed) {
+        onDragBegin?.();
+        // Keep the moves coming to this element even off the vertices.
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+      }
+    },
+    [shapes, grabRadiusMm, toMm, onDragBegin]
+  );
+
+  const handleNodePointerMove = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const at = toMm(e.clientX, e.clientY);
+      if (!at) return;
+      const state = dragRef.current;
+      if (!state.grabbed) {
+        lastMmRef.current = at;
+        return;
+      }
+      setPointerMm(at);
+      const from = lastMmRef.current ?? at;
+      const next = moveDrag(state, from, at);
+      lastMmRef.current = at;
+      setDrag(next);
+      dragRef.current = next;
+      // Commit as the drag goes, so the measurement the user watches
+      // belongs to the geometry being dragged. The history dedups the
+      // repeated snapshots, so one drag is still one undo step.
+      if (shouldCommit(next)) {
+        const edit = editFor(next, at);
+        if (edit) onEdit?.(edit);
+      }
+    },
+    [toMm, onEdit]
+  );
+
+  const endNodeDrag = useCallback(() => {
+    if (dragRef.current.grabbed) onDragEnd?.();
+    setDrag(idleDrag());
+    dragRef.current = idleDrag();
+    lastMmRef.current = null;
+    setPointerMm(null);
+  }, [onDragEnd]);
+
+  const handleNodePointerUp = useCallback(
+    (_e: React.PointerEvent<SVGSVGElement>) => {
+      endNodeDrag();
+    },
+    [endNodeDrag]
+  );
+
+  // Release the drag when the pointer ends off-canvas, so a drag that
+  // leaves the window does not leave the tool holding a vertex.
+  useEffect(() => {
+    if (!drag.grabbed) return;
+    const leave = () => endNodeDrag();
+    window.addEventListener("pointerup", leave);
+    window.addEventListener("pointercancel", leave);
+    return () => {
+      window.removeEventListener("pointerup", leave);
+      window.removeEventListener("pointercancel", leave);
+    };
+  }, [drag.grabbed, endNodeDrag]);
+
   const pathData = ready?.path_data ?? [];
 
   const handleDownload = useCallback(() => {
@@ -220,11 +381,20 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
           aria-label="Правки геометрии"
           style={{ display: "flex", gap: "0.5rem", padding: "0 1.5rem", alignItems: "center" }}
         >
-          {onUndo && (
-            <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Отменить">
-              Отменить
+<button
+              type="button"
+              onClick={() => setNodeTool((v) => !v)}
+              aria-pressed={nodeTool}
+              data-testid="node-tool-toggle"
+              title="Перетаскивать вершины (клавиша A)"
+            >
+              Вершины
             </button>
-          )}
+            {onUndo && (
+              <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Отменить">
+                Отменить
+              </button>
+            )}
           {onRedo && (
             <button type="button" onClick={onRedo} disabled={!canRedo} aria-label="Вернуть">
               Вернуть
@@ -246,10 +416,15 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
 
       <div className="studio-canvas">
         <svg
+          ref={svgRef}
           viewBox={`${view.minX} ${view.minY} ${view.w} ${view.h}`}
           preserveAspectRatio="xMidYMid meet"
           role="img"
           aria-label="Геометрия слоя"
+          onPointerDown={nodeTool ? handleNodePointerDown : undefined}
+          onPointerMove={nodeTool ? handleNodePointerMove : undefined}
+          onPointerUp={nodeTool ? handleNodePointerUp : undefined}
+          style={nodeTool ? { touchAction: "none", cursor: "crosshair" } : undefined}
         >
           <rect
             x={view.minX}
@@ -269,6 +444,12 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
               <path key={i} d={d} />
             ))}
           </g>
+          <NodeTool
+            shapes={shapes}
+            radiusMm={grabRadiusMm}
+            grabbed={drag.grabbed}
+            pointerMm={pointerMm}
+          />
           {mode === "mask" && ready?.min_width_mm !== undefined && (
             <ThresholdLine
               y={view.minY + view.h / 2}

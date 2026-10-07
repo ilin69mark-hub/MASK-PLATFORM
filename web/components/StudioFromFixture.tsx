@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { StudioCanvas } from "@/components/StudioCanvas";
-import { applyVertexEdit } from "@/lib/editor/applyEdit";
+import { applyVertexEdit, beginSession, endSession, idleSession, type DragSession } from "@/lib/editor/applyEdit";
 import { emptyHistory, redo, undo, type History } from "@/lib/editor/history";
 import {
   type Contour,
@@ -77,6 +77,9 @@ export function StudioFromFixture({
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  // The geometry as it was when the current drag began, so one drag is one
+  // undo step even though it commits on every pointer move.
+  const [session, setSession] = useState<DragSession>(idleSession());
 
   useEffect(() => {
     let cancelled = false;
@@ -114,13 +117,22 @@ export function StudioFromFixture({
     };
   }, [layers]);
 
+  const handleDragBegin = useCallback(() => {
+    const current = shapesByLayer[active];
+    if (current) setSession(beginSession(current));
+  }, [shapesByLayer, active]);
+
+  const handleDragEnd = useCallback(() => {
+    setSession(endSession());
+  }, []);
+
   const handleEdit = useCallback(
     (edit: VertexEdit) => {
       const current = shapesByLayer[active];
       const history = histories[active] ?? emptyHistory<Shapes>();
       if (!current) return;
       try {
-        const outcome = applyVertexEdit(current, history, edit, (s, e) => moveVertex(s, e));
+        const outcome = applyVertexEdit(current, history, edit, (s, e) => moveVertex(s, e), session);
         setShapesByLayer((prev) => prev.map((s, i) => (i === active ? outcome.shapes : s)));
         setHistories((prev) => prev.map((h, i) => (i === active ? outcome.history : h)));
         setEdited((prev) => prev.map((v, i) => (i === active ? true : v)));
@@ -129,7 +141,7 @@ export function StudioFromFixture({
         setEditError(e instanceof Error ? e.message : String(e));
       }
     },
-    [shapesByLayer, histories, active]
+    [shapesByLayer, histories, active, session]
   );
 
   const handleUndo = useCallback(() => {
@@ -206,6 +218,8 @@ export function StudioFromFixture({
           canUndo={(histories[active]?.past.length ?? 0) > 0}
           canRedo={(histories[active]?.future.length ?? 0) > 0}
           onEdit={handleEdit}
+          onDragBegin={handleDragBegin}
+          onDragEnd={handleDragEnd}
           onUndo={handleUndo}
           onRedo={handleRedo}
         />

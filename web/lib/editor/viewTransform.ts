@@ -31,32 +31,67 @@ export interface Point2D {
   y: number;
 }
 
+/** How the viewBox sits inside the element that draws it. */
+export interface Letterbox {
+  /** Millimetres per pixel; one factor for both axes. */
+  scale: number;
+  /** Pixels from the element's left edge to the viewBox's left edge. */
+  offsetX: number;
+  /** Pixels from the element's top edge to the viewBox's top edge. */
+  offsetY: number;
+}
+
 /**
- * Millimetres per pixel.
+ * The scale and the letterbox offsets, together.
  *
- * `preserveAspectRatio="…meet"` letterboxes rather than stretching, so both axes
- * share one factor and the smaller is the one that fits the whole viewBox. Taking
- * the larger is the tempting mistake: everything on the short axis then maps
- * outside the box, and a hit-test silently stops selecting anything near an edge.
+ * `preserveAspectRatio="…meet"` letterboxes rather than stretching: both axes
+ * share one factor (the smaller is the one that fits the whole viewBox) and the
+ * content is centred, leaving a margin on the other axis. Taking the larger
+ * factor is the tempting mistake: everything on the short axis then maps
+ * outside the box, and a hit-test silently stops selecting anything near an
+ * edge. Ignoring the offset is the subtler one: on a wide viewBox in a tall
+ * box, pixel 0 is not the viewBox's `minX` but a point left of it, so every
+ * hit-test is off by half the margin.
  *
- * Falls back to 1 for a box that has not been laid out yet, so a caller with no
- * measured size gets a usable identity mapping instead of a division by zero.
+ * Falls back to an identity mapping for a box that has not been laid out yet,
+ * so a caller with no measured size gets usable numbers instead of a division
+ * by zero.
  */
+export function letterbox(view: ViewBoxMm, drawn: DrawnSizePx): Letterbox {
+  if (drawn.width <= 0 || drawn.height <= 0) {
+    return { scale: 1, offsetX: 0, offsetY: 0 };
+  }
+  const scale = Math.min(view.w / drawn.width, view.h / drawn.height);
+  const contentW = view.w / scale;
+  const contentH = view.h / scale;
+  return {
+    scale,
+    offsetX: (drawn.width - contentW) / 2,
+    offsetY: (drawn.height - contentH) / 2,
+  };
+}
+
+/** Millimetres per pixel. */
 export function mmPerPixel(view: ViewBoxMm, drawn: DrawnSizePx): number {
-  if (drawn.width <= 0 || drawn.height <= 0) return 1;
-  return Math.min(view.w / drawn.width, view.h / drawn.height);
+  return letterbox(view, drawn).scale;
 }
 
 /** Pixel position inside the drawing box → millimetres. */
 export function pxToMm(px: Point2D, view: ViewBoxMm, drawn: DrawnSizePx): Point2D {
-  const scale = mmPerPixel(view, drawn);
-  return { x: view.minX + px.x * scale, y: view.minY + px.y * scale };
+  const { scale, offsetX, offsetY } = letterbox(view, drawn);
+  return {
+    x: view.minX + (px.x - offsetX) * scale,
+    y: view.minY + (px.y - offsetY) * scale,
+  };
 }
 
 /** Millimetres → pixel position inside the drawing box. */
 export function mmToPx(mm: Point2D, view: ViewBoxMm, drawn: DrawnSizePx): Point2D {
-  const scale = mmPerPixel(view, drawn);
-  return { x: (mm.x - view.minX) / scale, y: (mm.y - view.minY) / scale };
+  const { scale, offsetX, offsetY } = letterbox(view, drawn);
+  return {
+    x: (mm.x - view.minX) / scale + offsetX,
+    y: (mm.y - view.minY) / scale + offsetY,
+  };
 }
 
 /**
