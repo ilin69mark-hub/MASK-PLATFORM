@@ -720,6 +720,12 @@ mod island_tests {
         //
         // With only two points the geometry is genuinely ambiguous — nothing says
         // which way round — so this needs the third point to be a real test.
+        //
+        // This tests `arc_sweep`, not a valid pipeline contour: the arc names
+        // non-consecutive points, so `Contour::validate` must reject it under
+        // ADR-0017. The distinction is intentional — pure angle arithmetic does not
+        // certify a contour — and this test pins both halves rather than letting
+        // the sweep test read as contour approval.
         let contour = Contour {
             points: vec![
                 Point { x: 10.0, y: 0.0 },
@@ -738,6 +744,13 @@ mod island_tests {
             }],
             closed: true,
         };
+        assert!(
+            matches!(
+                contour.validate(crate::constants::MAX_COORDINATE_MM),
+                Err(crate::geom::GeometryError::ArcIndex { .. })
+            ),
+            "a multi-edge run is mathematically sweepable but not pipeline-valid"
+        );
         let sweep = crate::geom::arc_sweep(&contour.arcs[0], contour.points[0], contour.points[2]);
         assert!(
             (sweep + 3.0 * std::f64::consts::FRAC_PI_2).abs() < 1e-4,

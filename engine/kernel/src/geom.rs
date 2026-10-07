@@ -160,12 +160,14 @@ pub struct Contour {
     pub arcs: Vec<ArcSegment>,
 }
 
-/// One arc, replacing a run of straight edges between two existing points.
+/// One arc associated with a straight edge between two existing points.
 ///
-/// `from` and `to` index into [`Contour::points`]; `to` is exclusive, so the run is
-/// `from .. to`. The arc starts exactly at `points[from]` and ends exactly at
-/// `points[to]`, which is what makes the endpoints agree with the chordal
-/// representation.
+/// `from` and `to` index into [`Contour::points`]. The type can represent a run,
+/// but a valid contour in the kernel pipeline accepts only an arc that replaces
+/// exactly one consecutive edge: `to == (from + 1) % points.len()`. That restriction
+/// is checked by [`Contour::validate`] (ADR-0017). The arc starts exactly at
+/// `points[from]` and ends exactly at the adjoining `points[to]`, which is what
+/// makes the endpoints agree with the chordal representation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ArcSegment {
     pub from: usize,
@@ -219,7 +221,10 @@ fn arc_points(from: Point, to: Point, arc: &ArcSegment, tolerance_mm: f64) -> Ve
 /// Signed sweep of an arc in radians: positive counter-clockwise.
 ///
 /// The sign is what tells a segment of film from a notch in it, so it is
-/// computed once here and used by every measurement.
+/// computed once here and used by every measurement. This is pure angle
+/// arithmetic over the two explicitly supplied endpoints. It does not check the
+/// surrounding contour, so a passing sweep calculation is not evidence that the
+/// arc is a valid contour arc (ADR-0017).
 #[must_use]
 pub fn arc_sweep(arc: &ArcSegment, from: Point, to: Point) -> f64 {
     let start = (from.y - arc.centre.y).atan2(from.x - arc.centre.x);
@@ -269,11 +274,16 @@ impl Contour {
         }
     }
 
-    /// Each arc together with the two points it runs between.
+    /// Each valid arc together with the two points it runs between.
     ///
     /// An [`ArcSegment`] names indices, and every measurement wants the actual
     /// points, so resolving them here keeps that lookup in one place instead of
     /// repeated — and repeated differently — in each caller.
+    ///
+    /// Callers must use this only on a validated contour. This is the choke point
+    /// through which area, perimeter, path data, and hashes consume arcs, and it
+    /// implements the contour contract: exactly one consecutive edge per arc
+    /// (ADR-0017).
     #[must_use]
     pub fn resolved_arcs(&self) -> Vec<(ArcSegment, Point, Point)> {
         let n = self.points.len();
@@ -716,6 +726,38 @@ mod tests {
             .validate(LIMIT)
             .expect_err("one arc replaces one edge");
         assert!(matches!(err, GeometryError::ArcIndex { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validated_single_edge_arcs_are_all_resolved() {
+        // ADR-0017's contract from the other side: validation and resolution must
+        // agree. A contour that passes validation must not lose arcs anywhere
+        // downstream, or `resolved_arcs` would silently decide that a declared curve
+        // was not there.
+        let contour = Contour {
+            points: vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0)],
+            closed: true,
+            arcs: (0..4)
+                .map(|from| ArcSegment {
+                    from,
+                    to: (from + 1) % 4,
+                    centre: p(5.0, -1_000.0),
+                    radius: 1_000.0,
+                    ccw: false,
+                })
+                .collect(),
+        };
+
+        contour
+            .validate(LIMIT)
+            .expect("one-edge arcs must be pipeline-valid");
+        let resolved = contour.resolved_arcs();
+        assert_eq!(resolved.len(), contour.arcs.len());
+        for (index, (arc, from, to)) in resolved.iter().enumerate() {
+            assert_eq!((arc.from, arc.to), (index, (index + 1) % 4));
+            assert_eq!(*from, contour.points[index]);
+            assert_eq!(*to, contour.points[(index + 1) % 4]);
+        }
     }
 
     /// A square whose bottom edge is replaced by an arc of the given radius, bulging
