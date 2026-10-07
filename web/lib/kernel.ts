@@ -135,6 +135,31 @@ interface Kernel {
     material: string,
     plotter: string
   ): ValidationResult;
+  move_vertex(shapes: string, edit: VertexEdit): EditResult;
+}
+
+/**
+ * What one edit produced: canonical geometry to keep, and its measurement.
+ *
+ * Both are needed. The shapes go back into state so the next edit addresses the
+ * same vertex indices; the measurement comes with them so the numbers on screen
+ * belong to the geometry that will be validated.
+ */
+export interface EditResult {
+  shapes: Shapes;
+  measured: LayerResult;
+}
+
+/** One vertex move: which point, and where it goes. */
+export interface VertexEdit {
+  /** Index into `Shapes.shapes`. */
+  shape: number;
+  /** 0 for the outer contour, 1.. for its holes — `Shape::contours()` order. */
+  contour: number;
+  /** Index into the contour's points. */
+  vertex: number;
+  x_mm: number;
+  y_mm: number;
 }
 
 let kernel: Kernel | null = null;
@@ -317,6 +342,19 @@ export function validate(
     materialJson,
     plotterJson
   );
+}
+
+/**
+ * Move one vertex, through the kernel.
+ *
+ * The kernel applies the move, puts the coordinate on the canonical grid and
+ * refuses a move that would collapse the contour, then measures the result. Doing
+ * any of that in TypeScript would make the drawn geometry and the measured
+ * geometry two different things — which is how an editor ends up certifying a
+ * mask the station rejects.
+ */
+export function moveVertex(shapes: Shapes, edit: VertexEdit): EditResult {
+  return require_().move_vertex(JSON.stringify(shapes), edit);
 }
 
 /**

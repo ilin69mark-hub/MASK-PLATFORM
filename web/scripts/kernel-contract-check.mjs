@@ -88,6 +88,7 @@ const EXPORTS = [
   "content_hash",
   "validate_project",
   "nest_and_validate_project",
+  "move_vertex",
 ];
 
 function typeOf(value) {
@@ -264,6 +265,73 @@ async function main() {
     "and it says so in words, not only in the field list",
     nested.messages.some((m) => m.includes("\u0440\u0430\u0437\u0431\u0438\u0442")),
     JSON.stringify(nested.messages)
+  );
+
+  // ── the write path must go through the kernel ────────────────────────
+  //
+  // A vertex move is the first thing the editor does to geometry. If the facade
+  // could do it in JavaScript, the drawn shape and the measured shape would be
+  // two different objects, and the disagreement would only show up at submission.
+  // So the check is not "the export exists" — it is that the kernel's own numbers
+  // come back from a move.
+  const before = wasm.measure_layer(square).content_hash;
+  const moved = wasm.move_vertex(square, {
+    shape: 0,
+    contour: 0,
+    vertex: 1,
+    x_mm: 12.0,
+    y_mm: 0.0,
+  });
+  check(
+    "move_vertex returns canonical geometry and its measurement",
+    moved.shapes &&
+      Array.isArray(moved.shapes.shapes) &&
+      typeof moved.measured.area_mm2 === "number" &&
+      typeof moved.measured.content_hash === "string" &&
+      Array.isArray(moved.measured.path_data),
+    Object.keys(moved).join(",")
+  );
+  const storedPoints = moved.shapes.shapes[0].outer.points.map((p) => [p.x, p.y]);
+  const drawnPoints = moved.measured.path_data[0]
+    .match(/-?\d+(?:\.\d+)?/g)
+    .map(Number)
+    .reduce((pts, n, i) => {
+      if (i % 2 === 0) pts.push([n]);
+      else pts[pts.length - 1].push(n);
+      return pts;
+    }, []);
+  check(
+    "the geometry it returns is the geometry it measured",
+    JSON.stringify(storedPoints) === JSON.stringify(drawnPoints),
+    `stored ${JSON.stringify(storedPoints)}, drawn ${JSON.stringify(drawnPoints)}`
+  );
+
+  check(
+    "the moved path starts from the moved vertex",
+    moved.measured.path_data[0].startsWith("M 0.0000 0.0000 L 12.0000 0.0000"),
+    moved.measured.path_data[0]
+  );
+  check(
+    "the bounding box follows the move",
+    moved.measured.bbox[2] === 12,
+    JSON.stringify(moved.measured.bbox)
+  );
+  check(
+    "the content hash changes when a vertex moves",
+    typeof before === "string" && moved.measured.content_hash !== before,
+    `before ${before}, after ${moved.measured.content_hash}`
+  );
+
+  let refused = "";
+  try {
+    wasm.move_vertex(square, { shape: 0, contour: 0, vertex: 1, x_mm: 0, y_mm: 0 });
+  } catch (e) {
+    refused = String(e && e.message ? e.message : e);
+  }
+  check(
+    "a move onto a neighbour is refused, not silently merged",
+    refused.includes("would land on vertex"),
+    refused
   );
 
   console.log();
