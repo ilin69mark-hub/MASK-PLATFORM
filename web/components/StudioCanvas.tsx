@@ -6,6 +6,7 @@ import {
   type Crossing,
   type LayerResult,
   type Shapes,
+  type VertexEdit,
   loadKernel,
   measure,
 } from "@/lib/kernel";
@@ -47,6 +48,19 @@ export interface StudioProps {
   minWidthMm: number;
   /** Minimum gap between two elements (T-02), from the same profile. */
   minGapMm: number;
+  /**
+   * True once the layer was edited: it no longer derives from centrelines and
+   * is a `regions`-layer (ADR-0014) rather than a widened fixture layer.
+   */
+  edited?: boolean;
+  /** Last refused edit, if any — a kernel refusal, not a crash. */
+  editError?: string | null;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  /** One vertex move, applied by the owner through the kernel. */
+  onEdit?: (edit: VertexEdit) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 /**
@@ -65,7 +79,19 @@ export function StudioCanvas({
   revision,
   minWidthMm,
   minGapMm,
+  edited = false,
+  editError = null,
+  canUndo = false,
+  canRedo = false,
+  onEdit,
+  onUndo,
+  onRedo,
 }: StudioProps) {
+  // The Node tool (Phase 2) will call `onEdit` from SVG pointer events.
+  // Until then the callback is accepted and held by the owner: the write path
+  // `owner → moveVertex → setShapes` already exists and is covered by
+  // `applyEdit` unit tests plus the `move_vertex` kernel contract check.
+  void onEdit;
   const [mode, setMode] = useState<ViewMode>("mask");
   const [kernelReady, setKernelReady] = useState(false);
   const [measurement, setMeasurement] = useState<Measurement>({ status: "idle" });
@@ -186,6 +212,37 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
           ))}
         </div>
       </header>
+
+      {(onUndo ?? onRedo) && (
+        <div
+          className="studio-editbar"
+          role="toolbar"
+          aria-label="Правки геометрии"
+          style={{ display: "flex", gap: "0.5rem", padding: "0 1.5rem", alignItems: "center" }}
+        >
+          {onUndo && (
+            <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Отменить">
+              Отменить
+            </button>
+          )}
+          {onRedo && (
+            <button type="button" onClick={onRedo} disabled={!canRedo} aria-label="Вернуть">
+              Вернуть
+            </button>
+          )}
+          {edited && (
+            <span className="muted" data-testid="edited-badge">
+              изменён вручную
+            </span>
+          )}
+        </div>
+      )}
+
+      {editError && (
+        <div role="alert" data-testid="edit-error" style={{ color: "#c00", padding: "0 1.5rem" }}>
+          Правка отклонена: {editError}
+        </div>
+      )}
 
       <div className="studio-canvas">
         <svg

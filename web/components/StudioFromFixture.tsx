@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { StudioCanvas } from "@/components/StudioCanvas";
+import { applyVertexEdit } from "@/lib/editor/applyEdit";
+import { emptyHistory, redo, undo, type History } from "@/lib/editor/history";
 import {
   type Contour,
   type Shapes,
+  type VertexEdit,
   loadKernel,
+  moveVertex,
   toShapes,
   union,
   widen,
@@ -68,8 +72,11 @@ export function StudioFromFixture({
 }: StudioFromFixtureProps) {
   const [ready, setReady] = useState(false);
   const [shapesByLayer, setShapesByLayer] = useState<Shapes[]>([]);
+  const [histories, setHistories] = useState<History<Shapes>[]>([]);
+  const [edited, setEdited] = useState<boolean[]>([]);
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +100,8 @@ export function StudioFromFixture({
         }
         if (!cancelled) {
           setShapesByLayer(built);
+          setHistories(built.map(() => emptyHistory<Shapes>()));
+          setEdited(built.map(() => false));
           setReady(true);
         }
       } catch (e) {
@@ -104,6 +113,46 @@ export function StudioFromFixture({
       cancelled = true;
     };
   }, [layers]);
+
+  const handleEdit = useCallback(
+    (edit: VertexEdit) => {
+      const current = shapesByLayer[active];
+      const history = histories[active] ?? emptyHistory<Shapes>();
+      if (!current) return;
+      try {
+        const outcome = applyVertexEdit(current, history, edit, (s, e) => moveVertex(s, e));
+        setShapesByLayer((prev) => prev.map((s, i) => (i === active ? outcome.shapes : s)));
+        setHistories((prev) => prev.map((h, i) => (i === active ? outcome.history : h)));
+        setEdited((prev) => prev.map((v, i) => (i === active ? true : v)));
+        setEditError(null);
+      } catch (e) {
+        setEditError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [shapesByLayer, histories, active]
+  );
+
+  const handleUndo = useCallback(() => {
+    const current = shapesByLayer[active];
+    const history = histories[active];
+    if (!current || !history) return;
+    const back = undo(history, current);
+    if (!back) return;
+    setShapesByLayer((prev) => prev.map((s, i) => (i === active ? back.shapes : s)));
+    setHistories((prev) => prev.map((h, i) => (i === active ? back.history : h)));
+    setEditError(null);
+  }, [shapesByLayer, histories, active]);
+
+  const handleRedo = useCallback(() => {
+    const current = shapesByLayer[active];
+    const history = histories[active];
+    if (!current || !history) return;
+    const forward = redo(history, current);
+    if (!forward) return;
+    setShapesByLayer((prev) => prev.map((s, i) => (i === active ? forward.shapes : s)));
+    setHistories((prev) => prev.map((h, i) => (i === active ? forward.history : h)));
+    setEditError(null);
+  }, [shapesByLayer, histories, active]);
 
   if (error) {
     return (
@@ -152,6 +201,13 @@ export function StudioFromFixture({
           revision={revision}
           minWidthMm={minWidthMm}
           minGapMm={minGapMm}
+          edited={edited[active] ?? false}
+          editError={editError}
+          canUndo={(histories[active]?.past.length ?? 0) > 0}
+          canRedo={(histories[active]?.future.length ?? 0) > 0}
+          onEdit={handleEdit}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
         />
       )}
     </div>
