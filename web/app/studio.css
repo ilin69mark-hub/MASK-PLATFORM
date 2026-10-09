@@ -57,6 +57,32 @@
   border-color: #111;
 }
 
+/* The editing toolbar. Its buttons were unstyled, which made the Node toggle
+ * the worst control in the editor: it had `aria-pressed` and nothing else, so
+ * pressing it changed nothing on screen and the tool looked broken rather than
+ * off. The grab dots did not help, because they render whether the tool is on or
+ * not — their presence is not evidence that it is. */
+.studio-editbar button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.studio-editbar button[aria-pressed="true"] {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.studio-editbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .studio-canvas {
   margin: 1rem 0;
 }

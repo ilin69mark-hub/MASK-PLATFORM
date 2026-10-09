@@ -93,6 +93,16 @@ export interface StudioProps {
    * had been checked.
    */
   verdict?: VerdictView | null;
+  /**
+   * Switch the Node tool on from outside. Left out, the canvas owns the toggle.
+   *
+   * It exists so the tool's two visible effects can be tested without a pointer:
+   * whether the toggle announces that it is on, and whether the grab dots are
+   * drawn at all. Both were wrong in ways no existing test could see, because
+   * both are properties of a state the component held privately and showed
+   * nothing about.
+   */
+  nodeToolOn?: boolean;
   /** One vertex move, applied by the owner through the kernel. */
   onEdit?: (edit: VertexEdit) => void;
   /** A drag began: the owner snapshots the geometry for undo. */
@@ -134,6 +144,7 @@ export function StudioCanvas({
   canRepair = false,
   repair = null,
   verdict = null,
+  nodeToolOn,
   onEdit,
   onDragBegin,
   onDragEnd,
@@ -226,7 +237,11 @@ export function StudioCanvas({
   // The Node tool: off until toggled (hotkey A). While on, vertices are
   // drawn and draggable, and each committed drag calls `onEdit`. Defined
   // after `view`, since the pixel↔mm mapping needs it.
-  const [nodeTool, setNodeTool] = useState(false);
+  //
+  // Owned here unless the owner switches it on through `nodeToolOn`, which is
+  // how the tests reach a state that used to be reachable only by clicking.
+  const [nodeToolOwned, setNodeTool] = useState(false);
+  const nodeTool = nodeToolOn ?? nodeToolOwned;
   const [drawn, setDrawn] = useState<DrawnSizePx>({ width: 0, height: 0 });
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [drag, setDrag] = useState<DragState>(idleDrag());
@@ -534,12 +549,22 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
               <path key={i} d={d} />
             ))}
           </g>
-          <NodeTool
-            shapes={shapes}
-            radiusMm={grabRadiusMm}
-            grabbed={drag.grabbed}
-            pointerMm={pointerMm}
-          />
+          {/*
+            Only while the tool is on. They used to render unconditionally, which
+            was the second half of why the toggle looked broken: the dots appeared
+            whether or not the Node tool was active, so their presence was taken as
+            evidence that it was — and the tool then refused every drag. They are
+            the tool's affordance, not the layer's, and an affordance that is
+            visible when it does nothing is a lie about the editor's state.
+          */}
+          {nodeTool && (
+            <NodeTool
+              shapes={shapes}
+              radiusMm={grabRadiusMm}
+              grabbed={drag.grabbed}
+              pointerMm={pointerMm}
+            />
+          )}
           {mode === "mask" && ready?.min_width_mm !== undefined && (
             <ThresholdLine
               y={view.minY + view.h / 2}

@@ -252,3 +252,40 @@ test("no verdict yet is not the same as a clean one", () => {
   const html = renderToStaticMarkup(React.createElement(StudioCanvas, CANVAS));
   assert.ok(!html.includes('data-testid="verdict-panel"'));
 });
+
+test("the grab dots appear only while the Node tool is on", () => {
+  // They used to render unconditionally. A user pressed «Вершины», saw the dots
+  // already there, took that as proof the tool was active — and it then refused
+  // every drag. An affordance visible when it does nothing misreports the state.
+  const off = renderToStaticMarkup(React.createElement(StudioCanvas, CANVAS));
+  assert.ok(!off.includes('data-testid="node-tool"'), "no dots while the tool is off");
+
+  // The tool is on when its toggle reads pressed; the owner cannot set it, so the
+  // toggle's own state is what a reader has to go on.
+  const on = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      onEdit: () => {},
+      nodeToolOn: true,
+    })
+  );
+  assert.ok(on.includes('data-testid="node-tool"'), "dots while the tool is on");
+});
+
+test("the Node toggle carries the state it is switched to", () => {
+  // `aria-pressed` was already there and there was no rule styling it, so the
+  // button looked identical in both states. This asserts the attribute the style
+  // hangs off, so removing it breaks a test rather than the interface.
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      nodeToolOn: true,
+      onEdit: () => {},
+    })
+  );
+  assert.ok(
+    /data-testid="node-tool-toggle"[^>]*aria-pressed="true"/.test(html) ||
+      /aria-pressed="true"[^>]*data-testid="node-tool-toggle"/.test(html),
+    `the toggle must announce it is on: ${html}`
+  );
+});
