@@ -36,6 +36,36 @@ CGAL и libigl отвергнуты с основанием. Именно поэ
 
 ---
 
+## Сверка с кодом (2026-10-09)
+
+Задачи написаны без проверки дерева, поэтому каждая сверена с кодом отдельно.
+Ключевой факт: **цепочка спроектирована под продукт, которого нет** — 3D-экспорт
+помечен NOT NEEDED, а UV-параметризации в проекте не существует вовсе.
+
+| Задача | Что обещает | Что в коде | Вердикт |
+|---|---|---|---|
+| `GEOM-020` | `shape_centroid`, `shape_moment_of_inertia`, `contour_centroid`, `shape_outer_bbox` | `centroid`/`moment`/`inertia` — **ни одного вхождения в engine**; `bounding_box` и `shape_bounds` уже есть; тестов **201**, требуется «20+»; rustdoc есть (43 в `region_cache`, 28 в `integrity`) | ⚠️ **частично устарела** — `shape_outer_bbox` дублирует существующее, остальное отсутствует и полезно |
+| `GEOM-030` | libigl LSCM FFI, 3D→2D UV | нет `lscm`, `uv_*`, `parametri` — **нуля вхождений**. `cargo metadata` не показывает libigl: зависимости не подключены | ❌ **неактуально** — обслуживает `WEB-EXPORT`, помеченный NOT NEEDED |
+| `GEOM-040` | bridging / kerf / despeckle из Cutter | `bridge_unanchored` ✓, `offset_shape` ✓ (kerf), `unanchored_islands` ✓, `drop_small_regions` ✓ — всё в ядре | ✅ **сделано** — предлагает существующее |
+| `GEOM-050` | декомпозиция слоёв, UI мостов | `unanchored_islands` ✓, `bridge_unanchored` ✓; слоёв и UI нет | ⚠️ **частично** — алгоритмическая база есть, редактора нет |
+| `GEOM-060` | профили Material/Cutter/Paint | не реализовано; `VALIDATE-001` уже делает геометрию→вердикт | ⚠️ **реальная работа** — согласуется с `VALIDATE-001` |
+| `GEOM-070` | Go C ABI / gRPC | противоречит решению **А1** (сервисный слой отложен) | ❌ **противоречит принятому решению** |
+| `GEOM-080` | MVP mesh → UV → pattern → SVG | держится на UV (нет) и SVG (NOT NEEDED) | ❌ **недостижимо** — оба основания отсутствуют |
+| `GEOM-090` | продакшн-харднинг | golden-тесты есть (`scripts/golden/hashes.json`, регенератор в wasm), `make check` есть; **нет** property-based тестов, проверок утечек, многопоточности | ⚠️ **частично** — LSCM-профилирование отпадает вместе с `GEOM-030` |
+| `GEOM-100` | интеграция Studio | зависит от всей перечисленной цепочки | ❌ **недостижимо** |
+
+**Итог:** из девяти задач три уже сделаны или дублируют существующее
+(`020` частично, `040`, `090` частично), пять обслуживают отменённую функцию или
+противоречат решению (`030`, `050` частично, `070`, `080`, `100`), и **одна —
+`GEOM-060` — нетривиальная работа, которой действительно нет**.
+
+Про `shape_centroid` и `shape_moment_of_inertia`: отсутствуют, и обе полезны
+независимо от исчезнувшего направления — первая для раскладки, вторая для
+устойчивости разложения. Их стоит забрать в основной трекер отдельно от
+остального блока.
+
+---
+
 *Ниже — текст исследования дословно, включая заметку о гибридной архитектуре.*
 
 ---
@@ -48,10 +78,6 @@ CGAL и libigl отвергнуты с основанием. Именно поэ
 > вместе с правкой. Он не прошёл сверку с кодом, не встроен в волны и местами
 > противоречит принятому решению **A1** — см. **DOC-008**. Ни одна задача отсюда
 > не может считаться начатой.
-
-These tasks follow the architecture decision research and must be worked in stage order. Each stage depends on the previous one being complete.
-
-*P0/A1 decision: hybrid architecture (existing Rust kernel + libigl + custom Mask Domain Core). CGAL RED FLAG (commercial license required). libigl MPL-2.0 usable. Cutter algorithms reusable (same i_overlay backend). Conformal-stencil-generator too experimental. OpenCADKernel early stage MPL-2.0.*
 
 These tasks follow the architecture decision research and must be worked in stage order. Each stage depends on the previous one being complete.
 
