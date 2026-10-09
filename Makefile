@@ -125,6 +125,10 @@ physical: ## Print-ready files for every physical proof case, including the fail
 	@echo "Print at 100%. Do not scale: scaling changes the element width and voids the run."
 	@echo "Record what happens. See docs/protocols/PHYSICAL_PROOF_PROTOCOL.md"
 
+.PHONY: perf-frame
+perf-frame: ## Cost of one editor drag frame, per release, and the bisection share
+	cd $(ENGINE) && $(CARGO) run --release --quiet -p mask-validate --example editor_frame_cost
+
 .PHONY: spike
 spike: ## Re-run the geometry acceptance probe behind ADR-0003
 	cd $(SPIKE) && $(CARGO) run --quiet
