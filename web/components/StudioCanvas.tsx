@@ -25,7 +25,7 @@ import {
   shouldCommit,
   type DragState,
 } from "@/lib/editor/dragEdit";
-import { hitVertex, nearestVertexMm } from "@/lib/editor/hitTest";
+import { grabRadiusMm, hitVertex, nearestVertexMm, typicalSpacingMm } from "@/lib/editor/hitTest";
 import type { VerdictView } from "@/lib/editor/bundle";
 import type { RepairOutcome } from "@/lib/editor/repair";
 import { NodeTool } from "@/components/NodeTool";
@@ -304,9 +304,12 @@ export function StudioCanvas({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Pixel radius of the vertex grab target, turned into mm at the current
-  // scale and letterbox factor.
-  const grabRadiusMm = pxRadiusToMm(6, view, drawn);
+  // Pixel radius of the vertex grab target, turned into mm at the current scale
+  // and letterbox factor — then widened to a fraction of how far apart this
+  // geometry's vertices actually are, so the target is a sensible share of the
+  // gap between targets rather than a fixed number of pixels.
+  const requestedRadiusMm = pxRadiusToMm(9, view, drawn);
+  const grabRadius = grabRadiusMm(requestedRadiusMm, shapes);
 
   // Convert a pointer event to millimetres inside the viewBox, against the
   // element's real size and its letterbox.
@@ -330,20 +333,20 @@ export function StudioCanvas({
       if (!nodeToolRef.current) return;
       const at = toMm(e.clientX, e.clientY);
       if (!at) return;
-      const grabbed = hitVertex(shapes, at, { radiusMm: grabRadiusMm });
+      const grabbed = hitVertex(shapes, at, { radiusMm: grabRadius });
       const next = beginDrag(grabbed);
       setDrag(next);
       dragRef.current = next;
       lastMmRef.current = at;
       setPointerMm(at);
-      setMiss(grabbed ? null : describeMiss(shapes, at, grabRadiusMm));
+      setMiss(grabbed ? null : describeMiss(shapes, at, grabRadius));
       if (grabbed) {
         onDragBegin?.();
         // Keep the moves coming to this element even off the vertices.
         e.currentTarget.setPointerCapture?.(e.pointerId);
       }
     },
-    [shapes, grabRadiusMm, toMm, onDragBegin]
+    [shapes, grabRadius, toMm, onDragBegin]
   );
 
   const handleNodePointerMove = useCallback(
@@ -354,7 +357,7 @@ export function StudioCanvas({
       if (!state.grabbed) {
         lastMmRef.current = at;
         setPointerReadout(
-          `указатель: ${at.x.toFixed(1)}; ${at.y.toFixed(1)} мм · захват ${grabRadiusMm.toFixed(3)} мм`
+          `указатель: ${at.x.toFixed(1)}; ${at.y.toFixed(1)} мм · захват ${grabRadius.toFixed(2)} мм`
         );
         return;
       }
@@ -372,7 +375,7 @@ export function StudioCanvas({
         if (edit) onEdit?.(edit);
       }
     },
-    [toMm, onEdit, grabRadiusMm]
+    [toMm, onEdit, grabRadius]
   );
 
   const endNodeDrag = useCallback(() => {
@@ -600,7 +603,7 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
           {nodeTool && (
             <NodeTool
               shapes={shapes}
-              radiusMm={grabRadiusMm}
+              radiusMm={grabRadius}
               grabbed={drag.grabbed}
               pointerMm={pointerMm}
             />
@@ -685,30 +688,24 @@ function VerdictPanel({ view }: { view: VerdictView }) {
 /**
  * What to say when a grab found no vertex.
  *
- * The number is the whole point. "Nothing happened" is what a tool says when the
- * pointer is two millimetres off a vertex and also when it is four hundred — and
- * those are a tight radius and a broken coordinate mapping respectively. Saying
- * which one it was costs one line and turns an unreportable fault into one that
- * can be fixed.
+ * The number is the whole point: "nothing happened" is what a tool says when the
+ * pointer is two millimetres off a vertex and also when it is four hundred.
+ *
+ * An earlier version concluded what had happened — "the pointer and the dots are
+ * in different coordinates" — and was wrong. The user was 34 mm from the nearest
+ * vertex on a 223 mm outline whose vertices are 123 mm apart, which is ordinary
+ * aiming at the outline, not a broken mapping. A diagnostic that asserts a cause
+ * it has not established is worse than none: it sends the reader after a bug that
+ * is not there.
  */
-function describeMiss(
-  shapes: Shapes,
-  at: Point2D,
-  radiusMm: number
-): string {
+function describeMiss(shapes: Shapes, at: Point2D, radiusMm: number): string {
   const nearest = nearestVertexMm(shapes, at);
   if (nearest === null) return "Здесь нет ни одной вершины.";
-  if (nearest <= radiusMm * 1.5) {
-    // Close enough that the radius is the reason, whatever the tie rule did.
-    return (
-      `Мимо: ближайшая вершина в ${nearest.toFixed(3)} мм, ` +
-      `захват ${radiusMm.toFixed(3)} мм — наведите точнее.`
-    );
-  }
+  const spacing = typicalSpacingMm(shapes);
   return (
-    `Мимо: ближайшая вершина в ${nearest.toFixed(1)} мм, ` +
-    `захват ${radiusMm.toFixed(3)} мм. Это слишком далеко — указатель и точки ` +
-    "считаются в разных координатах."
+    `Мимо: до ближайшей вершины ${nearest.toFixed(1)} мм, захват ${radiusMm.toFixed(2)} мм` +
+    (spacing !== null ? `, вершины разне��ены на ${spacing.toFixed(0)} мм` : "") +
+    ". Захватываются только точки — поставьте указатель на кружок."
   );
 }
 

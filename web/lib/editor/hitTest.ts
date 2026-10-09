@@ -65,6 +65,71 @@ export function verticesOf(shapes: Shapes, skipRepeatedFirstPoint = true): Verte
 }
 
 /**
+ * How far apart vertices usually are — the median of each vertex's distance to
+ * its closest neighbour.
+ *
+ * This is the scale the grab radius has to answer to. A fixed radius in pixels is
+ * right on a dense mesh and useless on a coarse outline: on the studio's own
+ * fixture, 26 vertices spread over a 223 × 143 mm part have a typical spacing of
+ * 123 mm, so a 6 px radius — 1.2 mm, one percent of it — asks for pixel-perfect
+ * aiming at the corner of a 220 mm band. The user aiming at the outline is not
+ * missing the target; the target is a hundredth of the gap between targets.
+ *
+ * Median, not mean or minimum: a shape with one pair of almost-touching vertices
+ * would otherwise shrink the radius for every other corner.
+ */
+export function typicalSpacingMm(shapes: Shapes): number | null {
+  const vertices = verticesOf(shapes).map((v) => v.at);
+  if (vertices.length < 2) return null;
+
+  const distances: number[] = [];
+  for (let i = 0; i < vertices.length; i += 1) {
+    let nearest = Number.POSITIVE_INFINITY;
+    for (let j = 0; j < vertices.length; j += 1) {
+      if (i === j) continue;
+      const a = vertices[i];
+      const b = vertices[j];
+      if (!a || !b) continue;
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (d < nearest) nearest = d;
+    }
+    distances.push(nearest);
+  }
+  distances.sort((a, b) => a - b);
+  const middle = Math.floor(distances.length / 2);
+  // Odd count: the middle element is the median. Averaging the two middle ones is
+  // the even-count rule, and applying it to an odd count pulled a 0.01 mm pair
+  // halfway into the result — which is the one thing the median was chosen to
+  // prevent.
+  if (distances.length % 2 === 1) return distances[middle] ?? null;
+  const lo = distances[middle - 1];
+  const hi = distances[middle];
+  return lo !== undefined && hi !== undefined ? (lo + hi) / 2 : (hi ?? lo ?? null);
+}
+
+/**
+ * The radius a grab actually uses: the one the user aimed with, widened to a
+ * small fraction of how far apart this geometry's vertices are.
+ *
+ * The fraction is deliberately modest, because widening too far is its own fault.
+ * On a coarse outline a generous radius would grab whatever is nearest from
+ * anywhere on the canvas — dragging the left edge while the cursor is in the
+ * middle, a tool that answers every request with a different vertex.
+ *
+ * It only ever widens. A first version also capped it at a fraction of the
+ * spacing, which shrank the radius on dense meshes to below what the user aimed
+ * with — a pixel-precise tool becoming coarser the finer the geometry got, which
+ * is backwards.
+ */
+export function grabRadiusMm(requestedMm: number, shapes: Shapes): number {
+  const spacing = typicalSpacingMm(shapes);
+  if (spacing === null || !Number.isFinite(spacing) || spacing <= 0) {
+    return requestedMm;
+  }
+  return Math.max(requestedMm, spacing * 0.08);
+}
+
+/**
  * How far the nearest vertex is, in millimetres.
  *
  * Reported when a grab misses. A tool that says nothing when the pointer lands

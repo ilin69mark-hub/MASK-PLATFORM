@@ -11,7 +11,13 @@ import {
   type DrawnSizePx,
   type ViewBoxMm,
 } from "../lib/editor/viewTransform.ts";
-import { hitVertex, nearestVertexMm, verticesOf } from "../lib/editor/hitTest.ts";
+import {
+  grabRadiusMm,
+  hitVertex,
+  nearestVertexMm,
+  typicalSpacingMm,
+  verticesOf,
+} from "../lib/editor/hitTest.ts";
 import { toShapes, type Shapes } from "../lib/kernel.ts";
 
 /** A viewBox in millimetres and the pixels it is drawn into. */
@@ -370,4 +376,93 @@ test("a missed grab reports how far the nearest vertex was", () => {
   // wrong rather than the aim.
   assert.ok((nearestVertexMm(shapes, { x: 500, y: 500 }) ?? 0) > 100);
   assert.equal(nearestVertexMm(toShapes(), { x: 0, y: 0 }), null, "no vertices, no distance");
+});
+
+// ── the grab radius has to answer to the geometry, not only to pixels ─────
+
+test("a coarse outline gets a grab radius that is a share of its vertex spacing", () => {
+  // The studio's own fixture has 26 vertices on a 223 mm outline: about 123 mm
+  // between neighbours. A 6 px radius was 1.2 mm — one percent of that — which is
+  // pixel-perfect aiming at the corner of a 220 mm band, and the user aiming at
+  // the outline was reported as missing.
+  const coarse: Shapes = {
+    shapes: [
+      {
+        outer: {
+          points: [
+            { x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 },
+            { x: 0, y: 100 }, { x: 50, y: 50 },
+          ],
+          closed: true,
+        },
+        holes: [],
+      },
+    ],
+  };
+  const spacing = typicalSpacingMm(coarse);
+  assert.ok(spacing !== null && spacing > 50, `expected a coarse outline, got ${spacing}`);
+
+  const widened = grabRadiusMm(1.2, coarse);
+  assert.ok(
+    widened > 1.2,
+    `a pixel radius must widen on coarse geometry, got ${widened.toFixed(2)} mm`
+  );
+  assert.ok(
+    widened <= spacing * 0.08,
+    `and must be only a modest share of the spacing, got ${widened.toFixed(2)} of ${spacing?.toFixed(1)}`
+  );
+});
+
+test("a dense mesh keeps the radius the user aimed with", () => {
+  // The widening is for coarse geometry, not a licence to grab across the canvas.
+  const dense: Shapes = {
+    shapes: [
+      {
+        outer: {
+          points: Array.from({ length: 40 }, (_, i) => ({
+            x: (i % 8) * 0.2,
+            y: Math.floor(i / 8) * 0.2,
+          })),
+          closed: true,
+        },
+        holes: [],
+      },
+    ],
+  };
+  assert.equal(
+    grabRadiusMm(1.2, dense),
+    1.2,
+    "a pixel radius wins on a fine mesh — the widening never shrinks it"
+  );
+});
+
+test("geometry with one vertex has no spacing and keeps the radius it was given", () => {
+  const single: Shapes = {
+    shapes: [{ outer: { points: [{ x: 0, y: 0 }], closed: true }, holes: [] }],
+  };
+  assert.equal(typicalSpacingMm(single), null);
+  assert.equal(grabRadiusMm(1.2, single), 1.2);
+});
+
+test("the typical spacing is a median, not dragged down by one close pair", () => {
+  // One almost-touching pair must not shrink the radius for every other corner.
+  const shapes: Shapes = {
+    shapes: [
+      {
+        outer: {
+          points: [
+            { x: 0, y: 0 }, { x: 0.01, y: 0 }, { x: 100, y: 0 },
+            { x: 100, y: 100 }, { x: 0, y: 100 },
+          ],
+          closed: true,
+        },
+        holes: [],
+      },
+    ],
+  };
+  const spacing = typicalSpacingMm(shapes);
+  assert.ok(
+    spacing !== null && spacing > 50,
+    `the 0.01 mm pair must not define the scale, got ${spacing}`
+  );
 });
