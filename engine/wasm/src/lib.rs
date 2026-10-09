@@ -477,6 +477,85 @@ fn widen_centreline_inner(points_json: &str, target_width_mm: f64) -> Result<Lay
     measure_layer_inner(&to_string(&band)?)
 }
 
+/// Grow every region that is narrower than `target_width_mm`.
+///
+/// `widen_centreline` strokes a path to a width; this widens a *shape*, which is
+/// what the editor's widen tool needs: the layer on screen is already a region,
+/// not a centreline. Both walls move outward by half the shortfall, so a region
+/// measured at 0.2 mm with a 0.8 mm target grows by 0.3 mm per side.
+///
+/// A region already at or above the target is left alone rather than shrunk to
+/// it. The tool is a repair, and narrowing a mask that is already manufacturable
+/// would make it worse — the measured width is the floor, the target is only the
+/// goal.
+///
+/// The result is measured here rather than returned bare, for the same reason as
+/// `move_vertex`: the number the editor shows must belong to the geometry it will
+/// validate, not to what it last remembered.
+#[wasm_bindgen]
+pub fn widen_shape_set(shapes_json: &str, target_width_mm: f64) -> Result<JsValue, JsValue> {
+    to_js(&widen_shape_set_inner(shapes_json, target_width_mm).map_err(into_js)?)
+}
+
+/// Typed widening of a shape set, callable from Rust tests.
+fn widen_shape_set_inner(shapes_json: &str, target_width_mm: f64) -> Result<EditResult, JsError> {
+    if !target_width_mm.is_finite() || target_width_mm <= 0.0 {
+        return Err(JsError::new(
+            "widen: target width must be positive and finite",
+        ));
+    }
+    let shapes: Shapes = parse(shapes_json, "shapes")?;
+    shapes
+        .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| JsError::new(e.to_string()))?;
+
+    let mut widened = Vec::with_capacity(shapes.shapes.len());
+    for (index, shape) in shapes.shapes.iter().enumerate() {
+        // Same two measurements `measure_layer_inner` reduces over, so the
+        // shortfall this repairs is the one the validator would have complained
+        // about. Offsetting by `min_width` alone would leave a whisker untouched:
+        // a whisker is held by a neck, and `min_width` cannot see it.
+        let one = Shapes::single(shape.clone());
+        let measured: Option<f64> = match (
+            mask_kernel::min_width(&one),
+            mask_kernel::narrowest_neck(&one),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let delta_mm = match measured {
+            Some(m) if m < target_width_mm => (target_width_mm - m) / 2.0,
+            // Already wide enough, or unmeasurable: returned unchanged, because
+            // inventing a delta for a region nothing measured would reshape a
+            // figure on a number that does not exist.
+            _ => {
+                widened.push(shape.clone());
+                continue;
+            }
+        };
+        let grown = mask_kernel::offset_shape(&one, delta_mm)
+            .map_err(|e| JsError::new(format!("widen: region {index} could not be grown: {e}")))?;
+        widened.push(grown.shapes.into_iter().next().ok_or_else(|| {
+            JsError::new(format!(
+                "widen: region {index} disappeared at +{delta_mm} mm"
+            ))
+        })?);
+    }
+
+    let widened = mask_kernel::canonicalise_shapes(&Shapes { shapes: widened });
+    widened
+        .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+        .map_err(|e| JsError::new(format!("widen: {e}")))?;
+
+    let measured = measure_layer_inner(&to_string(&widened)?)?;
+    Ok(EditResult {
+        shapes: widened,
+        measured,
+    })
+}
+
 /// Union of two shape sets.
 ///
 /// Present because the editor builds a layer by stroking several centrelines and
@@ -2021,6 +2100,224 @@ mod editing {
     }
 }
 
+#[cfg(test)]
+mod repairs {
+    //! The auto-fixes the editor offers: widen a narrow region, anchor an island.
+    //!
+    //! Both are the tools a user reaches for *instead of* fixing geometry by hand,
+    //! so the tests here are about what they refuse as much as what they change.
+    //! A repair that silently produced unmanufacturable geometry would be worse than
+    //! no repair: the editor would certify a mask the station rejects.
+
+    use super::*;
+    use serde_json::json;
+
+    /// A frame with a hole, and an island floating inside the hole.
+    ///
+    /// The island is not attached to the frame — it is a separate region inside
+    /// the hole, which is what `bridge_unanchored` looks for.
+    fn island_in_a_frame(gap_mm: f64) -> String {
+        let outer = 200.0;
+        let frame = serde_json::json!({
+            "outer": {
+                "points": [[0.0,0.0],[outer,0.0],[outer,outer],[0.0,outer]],
+                "closed": true
+            },
+            "holes": [{
+                "points": [
+                    [gap_mm, gap_mm],
+                    [gap_mm, outer - gap_mm],
+                    [outer - gap_mm, outer - gap_mm],
+                    [outer - gap_mm, gap_mm]
+                ],
+                "closed": true
+            }]
+        });
+        let island = json!({
+            "outer": {
+                "points": [
+                    [2.0 * gap_mm, 2.0 * gap_mm],
+                    [2.0 * gap_mm + 4.0, 2.0 * gap_mm],
+                    [2.0 * gap_mm + 4.0, 2.0 * gap_mm + 4.0],
+                    [2.0 * gap_mm, 2.0 * gap_mm + 4.0]
+                ],
+                "closed": true
+            },
+            "holes": []
+        });
+        serde_json::json!({ "shapes": [frame, island] }).to_string()
+    }
+
+    /// A band `width` mm thick and 100 mm long.
+    fn band_json(width: f64) -> String {
+        let half = width / 2.0;
+        json!({
+            "shapes": [{
+                "outer": {
+                    "points": [
+                        [0.0, -half], [100.0, -half], [100.0, half], [0.0, half]
+                    ],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn widening_reaches_the_target_width() {
+        let result = widen_shape_set_inner(&band_json(0.2), 0.8).expect("widen");
+        let width = result.measured.min_width_mm.expect("a measurement");
+        assert!(
+            (width - 0.8).abs() < 1e-2,
+            "the region should measure about 0.80 mm, got {width}"
+        );
+    }
+
+    #[test]
+    fn widening_grows_the_layer_in_both_directions() {
+        // Both walls move: the offset is half the shortfall on each side, so the
+        // band's height grows by the full difference. If only one wall moved, the
+        // shape would slide instead of widen.
+        let before = measure_layer_inner(&band_json(0.2)).expect("measure");
+        let after = widen_shape_set_inner(&band_json(0.2), 0.8).expect("widen");
+        let grew = after.measured.bbox[3] - before.bbox[3];
+        assert!(
+            (grew - 0.6).abs() < 1e-2,
+            "0.2 mm to 0.8 mm should grow the band by 0.6 mm, got {grew}"
+        );
+        // The band must stay centred: the centre of the bbox must not move.
+        let before_centre = before.bbox[1] + before.bbox[3] / 2.0;
+        let after_centre = after.measured.bbox[1] + after.measured.bbox[3] / 2.0;
+        assert!(
+            (after_centre - before_centre).abs() < 1e-9,
+            "the band must stay centred, but the centre moved by {}",
+            after_centre - before_centre
+        );
+    }
+
+    #[test]
+    fn a_region_already_wide_enough_is_left_alone() {
+        // The tool is a repair. Narrowing a region that already cuts to the
+        // material would be the tool making things worse.
+        let before = measure_layer_inner(&band_json(2.0)).expect("measure");
+        let after = widen_shape_set_inner(&band_json(2.0), 0.8).expect("widen");
+        assert_eq!(
+            before.content_hash, after.measured.content_hash,
+            "a region above the target must be returned unchanged, hash and all"
+        );
+    }
+
+    #[test]
+    fn widening_reaches_the_neck_not_only_the_band() {
+        // A frame held to its island by a 0.2 mm tab: `min_width` sees the
+        // 3 mm frame walls, so a tool built on `min_width` alone would report
+        // success and leave the tab narrower than the material allows. This is
+        // BUG-019 in tool form, built the same way the kernel builds it in
+        // `narrowest_neck_finds_the_bridge_tab_that_min_width_missed`.
+        //
+        // The earlier version of this test drew the "neck" as a 0.2 mm step on
+        // the boundary of a solid band and asserted it measured 0.2 mm. It
+        // measured 4.0 mm, correctly: a step on the boundary is not a neck, and
+        // nothing erodes through there. A neck is where the piece comes apart.
+        let joined = bridge_inner(&island_in_a_frame(3.0), 0.2, 25.0).expect("bridge");
+        let neck = to_string(&joined.shapes).expect("joined geometry");
+        let before = measure_layer_inner(&neck).expect("measure");
+        assert!(
+            (before.min_width_mm.expect("a measurement") - 0.2).abs() < 0.05,
+            "the tab measures 0.2 mm, got {}",
+            before.min_width_mm.unwrap()
+        );
+
+        // Growing the whole region moves the tab's walls too, so the tab
+        // widens rather than vanishing — and the tool acts on the number the
+        // validator uses, not on the band around it.
+        let after = widen_shape_set_inner(&neck, 0.8).expect("widen");
+        assert!(
+            after.measured.area_mm2 > before.area_mm2,
+            "widening must grow the region"
+        );
+        assert!(
+            (after.measured.min_width_mm.expect("a measurement") - 0.8).abs() < 0.1,
+            "the tab should measure about 0.8 mm after widening, got {}",
+            after.measured.min_width_mm.unwrap()
+        );
+    }
+
+    #[test]
+    fn a_target_that_is_not_a_width_is_refused() {
+        for target in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = widen_shape_set_inner(&band_json(0.2), target)
+                .expect_err("a target that is not a positive finite width");
+            assert!(
+                err.message.contains("positive and finite"),
+                "expected the reason for {target}, got {:?}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn bridging_returns_the_tabs_it_placed_and_the_validator_reads() {
+        // The whole point of running this in the browser: the editor places tabs
+        // and the validator checks the same records, so T-06 and T-07 have
+        // something real to test rather than a declared number.
+        //
+        // The island is a 4×4 square inside a 200×200 frame with a 3 mm gap —
+        // the same geometry the existing bridge tests use.
+        let island = island_in_a_frame(3.0);
+
+        let repaired = bridge_inner(&island, 1.2, 25.0).expect("bridge");
+        assert!(
+            !repaired.bridges.is_empty(),
+            "a free island must be given at least one tab"
+        );
+        for record in &repaired.bridges {
+            assert!(
+                record.width_mm >= 1.2 - 1e-9,
+                "a tab narrower than the material would fail T-06 on the spot: {}",
+                record.width_mm
+            );
+            assert!(
+                record.length_mm <= 25.0 + 1e-9,
+                "a tab longer than the material would fail T-07: {}",
+                record.length_mm
+            );
+        }
+        assert!(
+            repaired.shapes.len() < island_count(&island),
+            "the tab joins the island to the frame: the region count must shrink"
+        );
+    }
+
+    #[test]
+    fn bridging_a_layer_with_nothing_to_anchor_reports_no_tabs() {
+        // One region and nothing enclosed: no island to attach, and inventing a
+        // tab would put steel where the user cut nothing.
+        let single = band_json(4.0);
+        let repaired = bridge_inner(&single, 1.2, 25.0).expect("bridge");
+        assert!(repaired.bridges.is_empty(), "nothing to anchor");
+    }
+
+    #[test]
+    fn bridging_that_cannot_reach_an_island_fails_rather_than_half_doing_it() {
+        // All-or-nothing, matching `maskctl --bridge`: an editor that placed some
+        // tabs and a station that placed none would disagree about one file.
+        //
+        // A tab width of zero cannot be cut, so no island can be anchored.
+        // The kernel returns an error rather than silently placing nothing.
+        let island = island_in_a_frame(3.0);
+        let err = bridge_inner(&island, 0.0, 25.0).expect_err("an uncuttable tab");
+        assert!(!err.message.is_empty(), "the refusal must carry a reason");
+    }
+
+    /// How many regions a JSON document declares.
+    fn island_count(json_str: &str) -> usize {
+        let shapes: Shapes = serde_json::from_str(json_str).expect("shapes");
+        shapes.shapes.len()
+    }
+}
 #[cfg(test)]
 mod golden_export {
     //! Writes the expected browser-visible values, so the Node runtime check can
