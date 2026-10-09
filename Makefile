@@ -102,6 +102,10 @@ fixtures: ## Report every fixture against the verdict it declares
 	cd $(ENGINE) && $(CARGO) build -q -p mask-cli
 	@python3 $(ROOT)/tools/fixture_report.py $(ENGINE)
 
+.PHONY: licenses
+licenses: ## Verify every dependency has its license text collected
+	@python3 $(ROOT)/tools/license_check.py
+
 .PHONY: physical
 physical: ## Print-ready files for every physical proof case, including the failing ones
 	@mkdir -p $(OUT)/physical

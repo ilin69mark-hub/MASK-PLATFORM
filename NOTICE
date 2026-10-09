@@ -1,0 +1,77 @@
+MASK PLATFORM — Third-Party Notices
+
+This product is built on the following third-party components.
+Every one is permissively licensed; the full text of each license is
+collected in docs/LICENSES/.
+
+| Component | Version | License | Text shipped by upstream |
+|---|---|---|---|
+| adler2 | 2.0.1 | `0BSD OR MIT OR Apache-2.0` | да |
+| bitflags | 2.13.2 | `MIT OR Apache-2.0` | да |
+| block-buffer | 0.10.4 | `MIT OR Apache-2.0` | да |
+| bumpalo | 3.20.3 | `MIT OR Apache-2.0` | да |
+| cfg-if | 1.0.5 | `MIT OR Apache-2.0` | да |
+| cpufeatures | 0.2.17 | `MIT OR Apache-2.0` | да |
+| crc32fast | 1.5.2 | `MIT OR Apache-2.0` | да |
+| crypto-common | 0.1.7 | `MIT OR Apache-2.0` | да |
+| digest | 0.10.7 | `MIT OR Apache-2.0` | да |
+| fdeflate | 0.3.7 | `MIT OR Apache-2.0` | да |
+| flate2 | 1.1.10 | `MIT OR Apache-2.0` | да |
+| futures-core | 0.3.34 | `MIT OR Apache-2.0` | да |
+| futures-task | 0.3.34 | `MIT OR Apache-2.0` | да |
+| futures-util | 0.3.34 | `MIT OR Apache-2.0` | да |
+| generic-array | 0.14.7 | `MIT` | да |
+| i_float | 5.0.0 | `MIT` | да |
+| i_key_sort | 0.11.0 | `MIT` | нет |
+| i_overlay | 9.0.0 | `MIT OR Apache-2.0` | нет |
+| i_shape | 5.0.0 | `MIT` | да |
+| i_tree | 0.19.0 | `MIT` | да |
+| itoa | 1.0.18 | `MIT OR Apache-2.0` | да |
+| js-sys | 0.3.106 | `MIT OR Apache-2.0` | да |
+| libc | 0.2.190 | `MIT OR Apache-2.0` | да |
+| libm | 0.2.16 | `MIT` | да |
+| memchr | 2.8.3 | `Unlicense OR MIT` | да |
+| miniz_oxide | 0.8.9 | `MIT OR Zlib OR Apache-2.0` | да |
+| miniz_oxide | 0.9.1 | `MIT OR Zlib OR Apache-2.0` | да |
+| once_cell | 1.21.4 | `MIT OR Apache-2.0` | да |
+| pin-project-lite | 0.2.17 | `Apache-2.0 OR MIT` | да |
+| png | 0.18.1 | `MIT OR Apache-2.0` | да |
+| proc-macro2 | 1.0.107 | `MIT OR Apache-2.0` | да |
+| quote | 1.0.47 | `MIT OR Apache-2.0` | да |
+| rustversion | 1.0.23 | `MIT OR Apache-2.0` | да |
+| serde | 1.0.229 | `MIT OR Apache-2.0` | да |
+| serde-wasm-bindgen | 0.6.5 | `MIT` | да |
+| serde_core | 1.0.229 | `MIT OR Apache-2.0` | да |
+| serde_derive | 1.0.229 | `MIT OR Apache-2.0` | да |
+| serde_json | 1.0.151 | `MIT OR Apache-2.0` | да |
+| sha2 | 0.10.9 | `MIT OR Apache-2.0` | да |
+| simd-adler32 | 0.3.10 | `MIT` | да |
+| slab | 0.4.12 | `MIT` | да |
+| syn | 3.0.6 | `MIT OR Apache-2.0` | да |
+| thiserror | 2.0.21 | `MIT OR Apache-2.0` | да |
+| thiserror-impl | 2.0.21 | `MIT OR Apache-2.0` | да |
+| typenum | 1.20.1 | `MIT OR Apache-2.0` | да |
+| unicode-ident | 1.0.26 | `(MIT OR Apache-2.0) AND Unicode-3.0` | да |
+| version_check | 0.9.5 | `MIT/Apache-2.0` | да |
+| wasm-bindgen | 0.2.129 | `MIT OR Apache-2.0` | да |
+| wasm-bindgen-macro | 0.2.129 | `MIT OR Apache-2.0` | да |
+| wasm-bindgen-macro-support | 0.2.129 | `MIT OR Apache-2.0` | да |
+| wasm-bindgen-shared | 0.2.129 | `MIT OR Apache-2.0` | да |
+| zlib-rs | 0.6.8 | `Zlib` | да |
+| zmij | 1.0.23 | `MIT` | да |
+
+Two components declare their license in Cargo.toml but do not ship the
+license text with the crate: **i_overlay** and **i_key_sort**. The texts
+in docs/LICENSES/ for those two are the standard texts of the licenses
+they declare, reconstructed from the SPDX identifier — the grant is
+unambiguous, but the reader should know the file did not come from the
+upstream author.
+
+The component that matters most is **i_overlay**, which the geometry
+kernel uses for boolean and offset operations. It is MIT OR Apache-2.0,
+which permits closed-source commercial use.
+
+Regenerate the table with:
+
+    cd engine && cargo metadata --format-version 1
+

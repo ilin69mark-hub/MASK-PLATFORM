@@ -115,15 +115,18 @@ purpose and the reason is on record.
 
 ## Compliance mechanism
 
-Nothing in the tree obliges us to publish source. What is still missing is
-**attribution**: the license texts are not collected anywhere, and there is no
-`NOTICE` naming what we ship.
+Nothing in the tree obliges us to publish source. Attribution is collected:
 
-`docs/LICENSES/` exists and is empty. Two things close the gap:
-
-1. The license texts of the crates above go into `docs/LICENSES/<crate>.txt`.
-2. A `NOTICE` lists the third-party components, so a recipient can see what the
-   binary is made of without reading the lockfile.
+- **`docs/LICENSES/`** holds the license text of every crate. 51 of the 53 ship
+  one from upstream and are copied verbatim; the two that do not — `i_overlay`
+  and `i_key_sort` — are marked in the file as reconstructed from the SPDX
+  identifier, so the grant is usable and its provenance is not hidden.
+- **`NOTICE`** at the repository root names every third-party component with its
+  version and license, and says which of them did not ship a text.
+- **`make licenses`** re-derives both from `cargo metadata` and fails if any
+  crate ends up without a file. That is the check that keeps this from going
+  stale: adding a dependency without collecting its license is a failed run,
+  not a silent gap.
 
 ## If libigl is ever adopted
 
