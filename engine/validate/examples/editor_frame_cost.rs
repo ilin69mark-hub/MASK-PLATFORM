@@ -70,6 +70,7 @@ enum What {
     Frame,
     Release,
     Neck,
+    Cached,
 }
 
 /// Region counts to report.
@@ -119,7 +120,11 @@ fn layer(count: usize) -> LayerInput {
 /// Returns the JSON text, so the next frame starts where a real drag's would. The
 /// browser only ever holds geometry as a string; timing a warm in-memory `Shapes`
 /// would be timing a different program.
-fn frame(shapes_json: &str, vertex: usize, to_x: f64) -> String {
+///
+/// `cached` is the same frame with the per-region memo the kernel now carries, which
+/// is what the editor actually runs. Both are measured against each other, because
+/// an optimisation nobody measured is a claim.
+fn frame(shapes_json: &str, vertex: usize, to_x: f64, cached: bool) -> String {
     let mut shapes: Shapes = serde_json::from_str(shapes_json).expect("the layer parses");
 
     // The neighbour checks `move_vertex_inner` runs before it moves anything.
@@ -146,15 +151,19 @@ fn frame(shapes_json: &str, vertex: usize, to_x: f64) -> String {
         .shapes
         .iter()
         .filter_map(|s| {
-            let one = Shapes::single(s.clone());
-            match (
-                mask_kernel::min_width(&one),
-                mask_kernel::narrowest_neck(&one),
-            ) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
+            if cached {
+                mask_kernel::region_cache::region_width(s)
+            } else {
+                let one = Shapes::single(s.clone());
+                match (
+                    mask_kernel::min_width(&one),
+                    mask_kernel::narrowest_neck(&one),
+                ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
             }
         })
         .reduce(f64::min);
@@ -172,6 +181,135 @@ fn neck_only(geometry: &Shapes) {
         .filter_map(|s| mask_kernel::narrowest_neck(&Shapes::single(s.clone())))
         .reduce(f64::min);
     assert!(narrowest.is_some());
+}
+
+// ── where the frame's time goes ───────────────────────────────────────
+//
+// `PERF-002` has to choose between a per-region width cache, an incremental
+// recompute, and declaring the editor small. That choice needs the breakdown, not
+// the total: a cache is worth nothing if the frame is mostly JSON, and an
+// incremental recompute is pointless if `min_width` and not `narrowest_neck` is
+// what costs.
+//
+// Each row is one step of the frame, measured over the same geometry. The rows do
+// not sum to the frame — they run in one process, so they inherit the interference
+// the file header warns about, and the frame also pays for work none of them is.
+// They are read against each other, which is what the choice needs.
+
+/// One step of the frame, timed on its own.
+fn breakdown_step(which: &str, start_json: &str, geometry: &Shapes) {
+    match which {
+        "parse" => {
+            let parsed: Shapes = serde_json::from_str(start_json).expect("parses");
+            std::hint::black_box(parsed.shapes.len());
+        }
+        "serialise" => {
+            std::hint::black_box(serde_json::to_string(geometry).expect("serialises"));
+        }
+        "canonicalise" => {
+            std::hint::black_box(mask_kernel::canonicalise_shapes(geometry));
+        }
+        "validate" => {
+            geometry
+                .validate_strict(mask_kernel::MAX_COORDINATE_MM)
+                .expect("valid");
+        }
+        "min_width" => {
+            let narrowest = geometry
+                .shapes
+                .iter()
+                .filter_map(|s| mask_kernel::min_width(&Shapes::single(s.clone())))
+                .reduce(f64::min);
+            assert!(narrowest.is_some());
+        }
+        "neck" => neck_only(geometry),
+        // The rest of what `measure_layer_inner` produces. A cache that only
+        // covers the two widths is worth nothing if one of these turns out to be
+        // the expensive part, so they are measured rather than assumed cheap.
+        "min_gap" => {
+            std::hint::black_box(mask_kernel::min_gap(geometry));
+        }
+        "self_intersections" => {
+            let found = mask_kernel::self_intersections(geometry);
+            std::hint::black_box(found.len());
+        }
+        "path_data" => {
+            let paths = geometry
+                .shapes
+                .iter()
+                .flat_map(|s| s.contours())
+                .map(mask_kernel::to_path_data)
+                .collect::<Vec<_>>();
+            std::hint::black_box(paths.len());
+        }
+        "layer_hash" => {
+            std::hint::black_box(mask_kernel::ContentHash::of(geometry).to_string());
+        }
+        // The candidate cache key: what it would cost to *check* whether a
+        // region's measurement is still valid. If this row is expensive next to
+        // `neck`, a self-validating cache is not worth building.
+        "region_hash" => {
+            let hashes = geometry
+                .shapes
+                .iter()
+                .map(|s| mask_kernel::ContentHash::of(&Shapes::single(s.clone())).to_string())
+                .collect::<Vec<_>>();
+            std::hint::black_box(hashes.len());
+        }
+        other => panic!("no such step: {other}"),
+    }
+}
+
+/// Time every step of the frame at one size and print them, slowest first.
+fn run_breakdown(count: usize) {
+    let geometry = shapes(count);
+    let start_json = serde_json::to_string(&geometry).expect("serialises");
+
+    let steps = [
+        "parse",
+        "serialise",
+        "canonicalise",
+        "validate",
+        "min_width",
+        "neck",
+        "min_gap",
+        "self_intersections",
+        "path_data",
+        "region_hash",
+        "layer_hash",
+    ];
+    let mut rows: Vec<(&str, f64)> = Vec::new();
+    for step in steps {
+        let repetitions = 9;
+        breakdown_step(step, &start_json, &geometry);
+        let mut samples = Vec::with_capacity(repetitions);
+        for _ in 0..repetitions {
+            let started = Instant::now();
+            breakdown_step(step, &start_json, &geometry);
+            samples.push(started.elapsed());
+        }
+        rows.push((step, ms(best(samples))));
+    }
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    println!("{count} регионов — где сидит кадр");
+    for (step, value) in &rows {
+        println!("  {step:>12} {value:>8.2} ms");
+    }
+    println!(
+        "  {:>12} {:>7.1} ms   ← если кэш, вот его цена: пересчёт этой строки \
+         вместо neck и min_width",
+        "neck + mw",
+        rows.iter()
+            .find(|(s, _)| *s == "neck")
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+            + rows
+                .iter()
+                .find(|(s, _)| *s == "min_width")
+                .map(|(_, v)| *v)
+                .unwrap_or(0.0)
+    );
 }
 
 fn best(mut samples: Vec<Duration>) -> Duration {
@@ -253,7 +391,10 @@ fn measure(what: What, count: usize) -> f64 {
     // Warm once, so the reported run is not a cold allocator's.
     match what {
         What::Frame => {
-            std::hint::black_box(frame(&start_json, 1, 0.05));
+            std::hint::black_box(frame(&start_json, 1, 0.05, false));
+        }
+        What::Cached => {
+            std::hint::black_box(frame(&start_json, 1, 0.05, true));
         }
         What::Release => {
             let _ = validate_with_registration(
@@ -275,7 +416,13 @@ fn measure(what: What, count: usize) -> f64 {
             What::Frame => {
                 // The pointer walks a vertex back and forth, as it does when a
                 // user moves it. Only the frame itself is inside the timer.
-                std::hint::black_box(frame(&start_json, 1, 0.05 + (step % 2) as f64 * 0.1));
+                std::hint::black_box(frame(&start_json, 1, 0.05 + (step % 2) as f64 * 0.1, false));
+            }
+            What::Cached => {
+                // Same walk, same alternation. The only difference is that the
+                // per-region widths come from the kernel's memo, which is the path
+                // the editor runs after PERF-002.
+                std::hint::black_box(frame(&start_json, 1, 0.05 + (step % 2) as f64 * 0.1, true));
             }
             What::Release => {
                 let report = validate_with_registration(
@@ -348,6 +495,7 @@ fn run_table() {
             What::Frame => "frame",
             What::Release => "release",
             What::Neck => "neck",
+            What::Cached => "cached",
         };
         let out = Command::new(&exe)
             .arg(name)
@@ -371,31 +519,28 @@ fn run_table() {
     };
 
     let frames = column(What::Frame);
+    let cached = column(What::Cached);
     let releases = column(What::Release);
     let necks = column(What::Neck);
     debug_assert_eq!(frames.len(), COUNTS.len());
 
     println!(
-        "{:>7} | {:>9} | {:>9} | {:>9} | {:>6} | {:>6} | {:>7}",
-        "regions", "frame", "release", "neck", "share", "×100", "16 ms?"
+        "{:>7} | {:>9} | {:>9} | {:>6} | {:>9} | {:>9} | {:>6} | {:>7}",
+        "regions", "frame", "кэш", "быстрее", "release", "neck", "×100", "16 ms?"
     );
     let baseline = frames[0];
     for (i, count) in COUNTS.iter().enumerate() {
-        let (frame, release, neck) = (frames[i], releases[i], necks[i]);
-        let share = if frame > 0.0 {
-            neck / frame * 100.0
-        } else {
-            0.0
-        };
+        let (frame, cache, release, neck) = (frames[i], cached[i], releases[i], necks[i]);
         println!(
-            "{count:>7} | {frame:>6.2} ms | {release:>6.2} ms | {neck:>6.2} ms | \
-             {share:>5.0}% | {:>5.0}× | {:>7}",
+            "{count:>7} | {frame:>6.2} ms | {cache:>6.2} ms | {:>5.0}× | {release:>6.2} ms | \
+             {neck:>6.2} ms | {:>5.0}× | {:>7}",
+            if cache > 0.0 { frame / cache } else { 0.0 },
             if baseline > 0.0 {
                 frame / baseline
             } else {
                 0.0
             },
-            if frame <= FRAME_BUDGET_MS {
+            if cache <= FRAME_BUDGET_MS {
                 "да"
             } else {
                 "НЕТ"
@@ -419,13 +564,16 @@ fn run_table() {
 }
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
-        None => run_table(),
-        Some("frame") => run_child(What::Frame),
-        Some("release") => run_child(What::Release),
-        Some("neck") => run_child(What::Neck),
-        Some(_other) => {
-            eprintln!("usage: editor_frame_cost [frame|release|neck]");
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (None, _) => run_table(),
+        (Some("frame"), _) => run_child(What::Frame),
+        (Some("release"), _) => run_child(What::Release),
+        (Some("neck"), _) => run_child(What::Neck),
+        (Some("cached"), _) => run_child(What::Cached),
+        (Some("breakdown"), Some(count)) => run_breakdown(count.parse().expect("a region count")),
+        (Some(_other), _) => {
+            eprintln!("usage: editor_frame_cost [frame|cached|release|neck|breakdown <regions>]");
             std::process::exit(2);
         }
     }

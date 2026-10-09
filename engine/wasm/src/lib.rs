@@ -393,21 +393,20 @@ fn measure_layer_inner(shapes_json: &str) -> Result<LayerResult, JsError> {
     // band keeps the figure intact long after the whisker has closed.
     // `narrowest_neck` counts components and sees it, which is why the validator
     // takes the smaller of the two and why the browser has to as well.
+    //
+    // Memoised per region, and keyed by the region's own content hash rather than
+    // by its index: a drag moves one vertex, the rest of the layer has not moved,
+    // and the two measurements above are 234 ms of a 242 ms frame at 2 000
+    // regions. `kernel::region_cache` carries the reasoning and the measurement.
+    //
+    // It lives in the kernel rather than in this wrapper on purpose. A cache here
+    // would leave the browser counting widths one way and the station another,
+    // and the two would agree only by construction. One memo, one answer, both
+    // runtimes.
     let min_width_mm = shapes
         .shapes
         .iter()
-        .filter_map(|s| {
-            let one = Shapes::single(s.clone());
-            match (
-                mask_kernel::min_width(&one),
-                mask_kernel::narrowest_neck(&one),
-            ) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            }
-        })
+        .filter_map(mask_kernel::region_cache::region_width)
         .reduce(f64::min);
 
     // T-02. Absent rather than zero for a single region: one piece of film has no
@@ -2096,6 +2095,89 @@ mod editing {
             result.measured.path_data[1].contains("L 5.0000 18.0000"),
             "the hole must be the thing that moved, got {}",
             result.measured.path_data[1]
+        );
+    }
+}
+
+#[cfg(test)]
+mod cache_agreement {
+    //! The memo must change the time a measurement takes and nothing else.
+    //!
+    //! `kernel::region_cache` makes the editor fast by remembering a region's width
+    //! under the hash of that region's geometry. The whole design rests on one
+    //! property: an answer from the cache is the answer the kernel would have
+    //! computed. If that were not true, the editor would show a number the station
+    //! does not agree with — which is ADR-0013's failure, reached by making the
+    //! code faster instead of wrong.
+
+    use super::*;
+
+    fn band(width_mm: f64) -> String {
+        let half = width_mm / 2.0;
+        serde_json::json!({
+            "shapes": [{
+                "outer": {
+                    "points": [[0.0, -half], [10.0, -half], [10.0, half], [0.0, half]],
+                    "closed": true
+                },
+                "holes": []
+            }]
+        })
+        .to_string()
+    }
+
+    fn width_of(json: &str) -> Option<f64> {
+        measure_layer_inner(json).expect("measure").min_width_mm
+    }
+
+    #[test]
+    fn a_cached_layer_reports_the_same_width_as_the_first_time() {
+        let json = band(0.2);
+        let first = width_of(&json).expect("a width");
+        let second = width_of(&json).expect("a width");
+        assert_eq!(first, second, "the second reading is the cached one");
+        assert!((first - 0.2).abs() < 1e-2, "got {first}");
+    }
+
+    #[test]
+    fn one_layer_does_not_answer_for_another() {
+        // The realistic failure: the editor switches layers, and the second layer
+        // reads the first one's number. A cache keyed by index would do exactly
+        // this the moment two layers had the same number of regions.
+        let narrow = band(0.2);
+        let wide = band(3.0);
+        assert!((width_of(&narrow).expect("a width") - 0.2).abs() < 1e-2);
+        assert!(
+            (width_of(&wide).expect("a width") - 3.0).abs() < 1e-2,
+            "the wide band read the narrow one's width"
+        );
+        // And back again, which is what switching tabs does.
+        assert!((width_of(&narrow).expect("a width") - 0.2).abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_moved_vertex_is_measured_afresh_rather_than_read_from_the_cache() {
+        // The drag itself: the geometry changes, so the hash changes, so the old
+        // entry cannot answer. Reading 0.2 mm for a band now 0.4 mm thick is the
+        // number a user would see and would believe.
+        //
+        // An earlier version of this test moved two of the four vertices of a
+        // 0.2 mm band by hand and asserted 0.4 mm. It measured 0.198 — correctly:
+        // the figure it had built was not a 0.4 mm band, it was a skew quadrilateral
+        // about as thick as the original. The geometry was wrong, not the cache.
+        let before = band(0.2);
+        let after = band(0.4);
+
+        let first = width_of(&before).expect("a width");
+        let second = width_of(&after).expect("a width");
+        assert!((first - 0.2).abs() < 1e-2, "before: {first}");
+        assert!(
+            (second - 0.4).abs() < 1e-2,
+            "the 0.4 mm band must read 0.4, got {second}"
+        );
+        assert!(
+            (second - first).abs() > 0.1,
+            "the two bands must not share a number: {first} and {second}"
         );
     }
 }
