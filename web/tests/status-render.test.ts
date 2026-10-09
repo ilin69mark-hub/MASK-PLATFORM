@@ -13,8 +13,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test } from "node:test";
 
-import { StatusBar } from "../components/StudioCanvas.tsx";
-import type { LayerResult } from "../lib/kernel.ts";
+import { StatusBar, StudioCanvas, type StudioProps } from "../components/StudioCanvas.tsx";
+import type { LayerResult, Shapes } from "../lib/kernel.ts";
 
 test("a kernel-load failure is rendered as an alert rather than loading", () => {
   const failure = "Mask kernel loaded but exposes no measure_layer()";
@@ -81,4 +81,92 @@ test("a ready measurement renders its measured thresholds, not placeholders", ()
   assert.ok(html.includes("ниже минимума 0.800 мм"));
   assert.ok(html.includes("ниже минимума 0.900 мм"));
   assert.ok(html.includes("площадь"));
+});
+
+/**
+ * The repair buttons, and the promise they make.
+ *
+ * A repair cut against a number the bench never used is worse than no repair at
+ * all: the editor would place steel the station rejects. So the buttons exist but
+ * stay disabled until the kernel has derived `effective_limits`, and the reason
+ * a repair did nothing is on screen rather than inferred from the canvas.
+ */
+const EMPTY: Shapes = { shapes: [] };
+
+const CANVAS: StudioProps = {
+  shapes: EMPTY,
+  projectId: "demo",
+  revision: 1,
+  minWidthMm: 0.8,
+  minGapMm: 0.9,
+};
+
+test("the repair buttons are disabled until the profile's limits are known", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, { ...CANVAS, canRepair: false, onWiden: () => {}, onBridge: () => {} })
+  );
+
+  assert.ok(html.includes('data-testid="widen-button"'), `rendered markup was: ${html}`);
+  assert.ok(html.includes('data-testid="bridge-button"'));
+  const disabled = html.match(/<button[^>]*data-testid="(?:widen|bridge)-button"[^>]*>/g) ?? [];
+  assert.equal(disabled.length, 2);
+  for (const button of disabled) {
+    assert.ok(/\sdisabled=""/.test(button), `must not be usable yet: ${button}`);
+  }
+});
+
+test("the repair buttons become usable once the limits are derived", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, { ...CANVAS, canRepair: true, onWiden: () => {}, onBridge: () => {} })
+  );
+
+  const buttons = html.match(/<button[^>]*data-testid="(?:widen|bridge)-button"[^>]*>/g) ?? [];
+  assert.equal(buttons.length, 2);
+  for (const button of buttons) {
+    assert.ok(!/\sdisabled=""/.test(button), `must be usable now: ${button}`);
+  }
+});
+
+test("what a repair did is shown, including when it changed nothing", () => {
+  // The `nothing` outcome is the one a user would otherwise read as a broken
+  // button, so it is the one that most needs saying out loud.
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      canRepair: true,
+      onWiden: () => {},
+      onBridge: () => {},
+      repair: {
+        kind: "nothing",
+        shapes: CANVAS.shapes,
+        message: "Свободных островков нет — язычки ставить некуда.",
+      },
+    })
+  );
+
+  assert.ok(html.includes('role="status"'));
+  assert.ok(html.includes("Свободных островков нет"));
+  assert.ok(html.includes('data-testid="repair-report"'));
+});
+
+test("a placed tab is reported with its own measurements, against the profile's limits", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      canRepair: true,
+      onWiden: () => {},
+      onBridge: () => {},
+      repair: {
+        kind: "bridged",
+        shapes: CANVAS.shapes,
+        bridges: [{ width_mm: 1.2, length_mm: 4.5, at: [0, 0] }],
+        message: "Язычков: 1 · ширина до 1.200 мм (минимум 1.200) · длина до 4.500 мм (максимум 25.000).",
+      },
+    })
+  );
+
+  assert.ok(html.includes("Язычков: 1"));
+  assert.ok(html.includes("1.200"));
+  assert.ok(html.includes("4.500"));
+  assert.ok(html.includes("25.000"));
 });

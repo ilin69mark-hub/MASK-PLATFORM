@@ -22,6 +22,7 @@ const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../../..");
 
 const FIXTURE = resolve(ROOT, "engine/fixtures/proof_panel.json");
 const MATERIAL = resolve(ROOT, "engine/profiles/data/matte-vinyl-090.v4.json");
+const PLOTTER = resolve(ROOT, "engine/profiles/data/knife-25mm.v2.json");
 
 interface Fixture {
   project_id: string;
@@ -35,9 +36,10 @@ interface Fixture {
 }
 
 export default async function StudioPage() {
-  const [fixtureText, materialJson] = await Promise.all([
+  const [fixtureText, materialJson, plotterJson] = await Promise.all([
     readFile(FIXTURE, "utf8"),
     readFile(MATERIAL, "utf8"),
+    readFile(PLOTTER, "utf8"),
   ]);
 
   const fixture = JSON.parse(fixtureText) as Fixture;
@@ -63,6 +65,13 @@ export default async function StudioPage() {
         layers={layers}
         minWidthMm={material.minimums.line_width_mm}
         minGapMm={material.minimums.gap_mm}
+        // Both profiles, as text. The repairs need `effective_limits`, which is
+        // material *and* plotter jointly — passing only the material would mean
+        // the browser placed tabs against numbers the bench never used. Sent as
+        // strings rather than parsed numbers so the kernel, not this page, is
+        // what derives the limits.
+        materialJson={materialJson}
+        plotterJson={plotterJson}
       />
 
       <section style={{ padding: "0 1.5rem 2rem", maxWidth: "52rem", color: "#444" }}>
@@ -82,8 +91,8 @@ export default async function StudioPage() {
           воспроизведены через год.
         </p>
         <p style={{ lineHeight: 1.55 }}>
-          Не реализовано: инструменты редактирования вершин, слои перекрываются
-          графом, замер зазора между элементами, трёхмерный просмотр.
+          Не реализовано: слои перекрываются графом, трёхмерный просмотр,
+          сохранение правок обратно в проект.
         </p>
       </section>
     </main>

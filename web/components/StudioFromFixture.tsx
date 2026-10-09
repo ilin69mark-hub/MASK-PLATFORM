@@ -4,16 +4,26 @@ import { useCallback, useEffect, useState } from "react";
 
 import { StudioCanvas } from "@/components/StudioCanvas";
 import { applyVertexEdit, beginSession, endSession, idleSession, type DragSession } from "@/lib/editor/applyEdit";
-import { emptyHistory, redo, undo, type History } from "@/lib/editor/history";
+import { emptyHistory, pushEdit, redo, undo, type History } from "@/lib/editor/history";
+import {
+  bridgeToProfile,
+  repairProfile,
+  widenToProfile,
+  type RepairOutcome,
+  type RepairProfile,
+} from "@/lib/editor/repair";
 import {
   type Contour,
   type Shapes,
   type VertexEdit,
+  bridgeUnanchored,
   loadKernel,
+  limits,
   moveVertex,
   toShapes,
   union,
   widen,
+  widenShapes,
 } from "@/lib/kernel";
 
 /**
@@ -40,6 +50,15 @@ export interface StudioFromFixtureProps {
   minWidthMm: number;
   /** Minimum gap between two elements (T-02), from the same profile. */
   minGapMm: number;
+  /**
+   * The material and plotter profiles, as text.
+   *
+   * `effective_limits` derives from both, so the browser needs both. Passed
+   * unparsed on purpose: the kernel is what turns them into numbers, and a
+   * server-side derivation would be a second derivation to keep in step.
+   */
+  materialJson: string;
+  plotterJson: string;
 }
 
 /** Parse the kernel's canonical path data back into a contour. */
@@ -69,6 +88,8 @@ export function StudioFromFixture({
   layers,
   minWidthMm,
   minGapMm,
+  materialJson,
+  plotterJson,
 }: StudioFromFixtureProps) {
   const [ready, setReady] = useState(false);
   const [shapesByLayer, setShapesByLayer] = useState<Shapes[]>([]);
@@ -77,6 +98,13 @@ export function StudioFromFixture({
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  // The repair numbers, from `effective_limits`. Null until the kernel has
+  // derived them, which is also when the buttons become available — a repair
+  // that fell back to a default would cut against numbers the bench never used.
+  const [profile, setProfile] = useState<RepairProfile | null>(null);
+  // What the last repair did, so the user can see what was changed rather than
+  // infer it from the canvas.
+  const [repair, setRepair] = useState<RepairOutcome | null>(null);
   // The geometry as it was when the current drag began, so one drag is one
   // undo step even though it commits on every pointer move.
   const [session, setSession] = useState<DragSession>(idleSession());
@@ -87,6 +115,9 @@ export function StudioFromFixture({
     (async () => {
       try {
         await loadKernel();
+        // Derived before anything is drawn: a repair offered before this
+        // resolves would have no profile to cut against.
+        const derived = repairProfile(limits(materialJson, plotterJson));
         const built: Shapes[] = [];
         for (const layer of layers) {
           const bands: Shapes[] = [];
@@ -105,6 +136,7 @@ export function StudioFromFixture({
           setShapesByLayer(built);
           setHistories(built.map(() => emptyHistory<Shapes>()));
           setEdited(built.map(() => false));
+          setProfile(derived);
           setReady(true);
         }
       } catch (e) {
@@ -115,7 +147,7 @@ export function StudioFromFixture({
     return () => {
       cancelled = true;
     };
-  }, [layers]);
+  }, [layers, materialJson, plotterJson]);
 
   const handleDragBegin = useCallback(() => {
     const current = shapesByLayer[active];
@@ -165,6 +197,56 @@ export function StudioFromFixture({
     setHistories((prev) => prev.map((h, i) => (i === active ? forward.history : h)));
     setEditError(null);
   }, [shapesByLayer, histories, active]);
+
+  /**
+   * Run a repair and record it as one undo step.
+   *
+   * The pre-repair geometry is pushed only when the repair changed something.
+   * That is not left to `pushEdit`'s dedup by accident: pressing undo after a
+   * repair that changed nothing and watching nothing move is how a user
+   * concludes the button is broken.
+   */
+  const applyRepair = useCallback(
+    (before: Shapes, outcome: RepairOutcome) => {
+      setRepair(outcome);
+      setEditError(null);
+      if (outcome.kind === "nothing") return;
+      setShapesByLayer((prev) => prev.map((s, i) => (i === active ? outcome.shapes : s)));
+      setHistories((prev) =>
+        prev.map((h, i) => (i === active ? pushEdit(h, before) : h))
+      );
+      setEdited((prev) => prev.map((v, i) => (i === active ? true : v)));
+    },
+    [active]
+  );
+
+  const handleWiden = useCallback(() => {
+    const current = shapesByLayer[active];
+    if (!current || !profile) return;
+    try {
+      applyRepair(
+        current,
+        widenToProfile(current, profile, (s, targetMm) => widenShapes(s, targetMm))
+      );
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e));
+    }
+  }, [shapesByLayer, profile, applyRepair]);
+
+  const handleBridge = useCallback(() => {
+    const current = shapesByLayer[active];
+    if (!current || !profile) return;
+    try {
+      applyRepair(
+        current,
+        bridgeToProfile(current, profile, (s, widthMm, maxLengthMm) =>
+          bridgeUnanchored(s, widthMm, maxLengthMm)
+        )
+      );
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e));
+    }
+  }, [shapesByLayer, profile, applyRepair]);
 
   if (error) {
     return (
@@ -217,11 +299,15 @@ export function StudioFromFixture({
           editError={editError}
           canUndo={(histories[active]?.past.length ?? 0) > 0}
           canRedo={(histories[active]?.future.length ?? 0) > 0}
+          canRepair={profile !== null}
+          repair={repair}
           onEdit={handleEdit}
           onDragBegin={handleDragBegin}
           onDragEnd={handleDragEnd}
           onUndo={handleUndo}
           onRedo={handleRedo}
+          onWiden={handleWiden}
+          onBridge={handleBridge}
         />
       )}
     </div>

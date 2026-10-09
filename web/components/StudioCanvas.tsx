@@ -25,6 +25,7 @@ import {
   type DragState,
 } from "@/lib/editor/dragEdit";
 import { hitVertex } from "@/lib/editor/hitTest";
+import type { RepairOutcome } from "@/lib/editor/repair";
 import { NodeTool } from "@/components/NodeTool";
 import {
   type MeasurementState,
@@ -73,6 +74,16 @@ export interface StudioProps {
   editError?: string | null;
   canUndo?: boolean;
   canRedo?: boolean;
+  /**
+   * False until the kernel has derived the profile's limits.
+   *
+   * The repairs stay disabled rather than guessing: a repair cut against its own
+   * default tab width would place steel the bench will not cut, and the user
+   * would find out at the station.
+   */
+  canRepair?: boolean;
+  /** What the last repair did, shown so a change is never silent. */
+  repair?: RepairOutcome | null;
   /** One vertex move, applied by the owner through the kernel. */
   onEdit?: (edit: VertexEdit) => void;
   /** A drag began: the owner snapshots the geometry for undo. */
@@ -81,6 +92,10 @@ export interface StudioProps {
   onDragEnd?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
+  /** Grow every narrow region to the material's minimum width. */
+  onWiden?: () => void;
+  /** Anchor every free island with a tab. */
+  onBridge?: () => void;
 }
 
 /**
@@ -103,11 +118,15 @@ export function StudioCanvas({
   editError = null,
   canUndo = false,
   canRedo = false,
+  canRepair = false,
+  repair = null,
   onEdit,
   onDragBegin,
   onDragEnd,
   onUndo,
   onRedo,
+  onWiden,
+  onBridge,
 }: StudioProps) {
   const [mode, setMode] = useState<ViewMode>("mask");
   const [kernelReady, setKernelReady] = useState(false);
@@ -374,7 +393,13 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
         </div>
       </header>
 
-      {(onUndo ?? onRedo) && (
+      {/*
+        Gated on any editing affordance, not on `onUndo ?? onRedo` alone. It used
+        to be the latter, which meant the repair buttons appeared only because
+        the owner happened to wire undo — a component given a repair and nothing
+        else rendered no toolbar at all, and the repairs silently did not exist.
+      */}
+      {(onUndo ?? onRedo ?? onEdit ?? onWiden ?? onBridge) && (
         <div
           className="studio-editbar"
           role="toolbar"
@@ -390,6 +415,28 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
             >
               Вершины
             </button>
+            {onWiden && (
+              <button
+                type="button"
+                onClick={onWiden}
+                disabled={!canRepair}
+                data-testid="widen-button"
+                title={`Расширить узкие элементы до ${minWidthMm.toFixed(3)} мм`}
+              >
+                Расширить
+              </button>
+            )}
+            {onBridge && (
+              <button
+                type="button"
+                onClick={onBridge}
+                disabled={!canRepair}
+                data-testid="bridge-button"
+                title="Привязать свободные островки язычками"
+              >
+                Язычки
+              </button>
+            )}
             {onUndo && (
               <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Отменить">
                 Отменить
@@ -406,6 +453,16 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
             </span>
           )}
         </div>
+      )}
+
+      {repair && (
+        <p
+          role="status"
+          data-testid="repair-report"
+          style={{ padding: "0 1.5rem", margin: 0, color: "#444" }}
+        >
+          {repair.message}
+        </p>
       )}
 
       {editError && (

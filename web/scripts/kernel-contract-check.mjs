@@ -107,6 +107,8 @@ const EXPORTS = [
   "validate_project",
   "nest_and_validate_project",
   "move_vertex",
+  "widen_shape_set",
+  "bridge_unanchored_islands",
 ];
 
 function typeOf(value) {
@@ -123,6 +125,23 @@ function typeOf(value) {
  */
 function matchesType(value, expected) {
   return expected.split("|").includes(typeOf(value));
+}
+
+/** A shape's stored vertices, in the order the kernel serialised them. */
+function storedPointsOf(shape) {
+  return shape.outer.points.map((p) => [p.x, p.y]);
+}
+
+/** The vertices a canonical path draws, recovered from its numbers. */
+function pointsInPath(d) {
+  return d
+    .match(/-?\d+(?:\.\d+)?/g)
+    .map(Number)
+    .reduce((pts, n, i) => {
+      if (i % 2 === 0) pts.push([n]);
+      else pts[pts.length - 1].push(n);
+      return pts;
+    }, []);
 }
 
 async function main() {
@@ -319,15 +338,8 @@ async function main() {
       Array.isArray(moved.measured.path_data),
     Object.keys(moved).join(",")
   );
-  const storedPoints = moved.shapes.shapes[0].outer.points.map((p) => [p.x, p.y]);
-  const drawnPoints = moved.measured.path_data[0]
-    .match(/-?\d+(?:\.\d+)?/g)
-    .map(Number)
-    .reduce((pts, n, i) => {
-      if (i % 2 === 0) pts.push([n]);
-      else pts[pts.length - 1].push(n);
-      return pts;
-    }, []);
+  const storedPoints = storedPointsOf(moved.shapes.shapes[0]);
+  const drawnPoints = pointsInPath(moved.measured.path_data[0]);
   check(
     "the geometry it returns is the geometry it measured",
     JSON.stringify(storedPoints) === JSON.stringify(drawnPoints),
@@ -360,6 +372,101 @@ async function main() {
     "a move onto a neighbour is refused, not silently merged",
     refused.includes("would land on vertex"),
     refused
+  );
+
+  // ── the repairs must run in this runtime, not just exist ─────────────
+  //
+  // Same reasoning as the write path. A repair that only existed as an export
+  // would leave the editor's buttons wired to something the browser runtime
+  // cannot do — and the user would find out by pressing them.
+  const whisker = JSON.stringify({
+    shapes: [
+      {
+        outer: { points: [[0, 0], [100, 0], [100, 0.2], [0, 0.2]], closed: true },
+        holes: [],
+      },
+    ],
+  });
+  const widened = wasm.widen_shape_set(whisker, limits.line_width_mm);
+  check(
+    "widen_shape_set returns geometry measured against the target",
+    widened.shapes &&
+      typeof widened.measured.min_width_mm === "number" &&
+      widened.measured.min_width_mm >= limits.line_width_mm - 1e-3,
+    `min_width_mm ${widened.measured.min_width_mm}, target ${limits.line_width_mm}`
+  );
+  const widenedStored = storedPointsOf(widened.shapes.shapes[0]);
+  const widenedDrawn = pointsInPath(widened.measured.path_data[0]);
+  check(
+    "the geometry it returns is the geometry it measured",
+    JSON.stringify(widenedStored) === JSON.stringify(widenedDrawn),
+    `stored ${JSON.stringify(widenedStored)}, drawn ${JSON.stringify(widenedDrawn)}`
+  );
+
+  const alreadyWide = wasm.widen_shape_set(square, limits.line_width_mm);
+  check(
+    "a region already wide enough comes back untouched",
+    alreadyWide.measured.content_hash === wasm.measure_layer(square).content_hash,
+    `before ${wasm.measure_layer(square).content_hash}, after ${alreadyWide.measured.content_hash}`
+  );
+
+  const frame = JSON.stringify({
+    shapes: [
+      {
+        outer: { points: [[0, 0], [200, 0], [200, 200], [0, 200]], closed: true },
+        holes: [{ points: [[3, 3], [3, 197], [197, 197], [197, 3]], closed: true }],
+      },
+      {
+        outer: { points: [[6, 6], [6, 10], [10, 10], [10, 6]], closed: true },
+        holes: [],
+      },
+    ],
+  });
+  const bridged = wasm.bridge_unanchored_islands(
+    frame,
+    limits.bridge_width_mm,
+    limits.bridge_length_mm
+  );
+  check(
+    "bridge_unanchored_islands returns the tabs it placed",
+    Array.isArray(bridged.bridges) && bridged.bridges.length > 0,
+    JSON.stringify(bridged.bridges)
+  );
+  const tabsPass = bridged.bridges.every(
+    (b) =>
+      typeof b.width_mm === "number" &&
+      typeof b.length_mm === "number" &&
+      typeof b.at?.x === "number" &&
+      typeof b.at?.y === "number"
+  );
+  check("every tab carries the two numbers T-06 and T-07 read", tabsPass, JSON.stringify(bridged.bridges));
+  check(
+    "no tab is narrower or longer than the profile allows",
+    bridged.bridges.every(
+      (b) =>
+        b.width_mm >= limits.bridge_width_mm - 1e-9 &&
+        b.length_mm <= limits.bridge_length_mm + 1e-9
+    ),
+    `limits ${limits.bridge_width_mm}/${limits.bridge_length_mm}, tabs ${JSON.stringify(
+      bridged.bridges.map((b) => [b.width_mm, b.length_mm])
+    )}`
+  );
+  check(
+    "the tab joins the island to the frame: one region fewer",
+    bridged.shapes.shapes.length === 1,
+    `${bridged.shapes.shapes.length} regions`
+  );
+
+  let uncuttable = "";
+  try {
+    wasm.bridge_unanchored_islands(frame, 0, limits.bridge_length_mm);
+  } catch (e) {
+    uncuttable = String(e && e.message ? e.message : e);
+  }
+  check(
+    "an uncuttable tab is refused rather than silently placing none",
+    uncuttable.length > 0,
+    uncuttable
   );
 
   console.log();

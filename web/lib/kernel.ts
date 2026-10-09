@@ -161,6 +161,8 @@ interface Kernel {
     plotter: string
   ): ValidationResult;
   move_vertex(shapes: string, edit: VertexEdit): EditResult;
+  widen_shape_set(shapes: string, target_width_mm: number): EditResult;
+  bridge_unanchored_islands(shapes: string, width_mm: number, max_length_mm: number): RepairResult;
 }
 
 /**
@@ -185,6 +187,14 @@ export interface VertexEdit {
   vertex: number;
   x_mm: number;
   y_mm: number;
+}
+
+/** The result of an auto-fix pass: repaired geometry plus what was done to it. */
+export interface RepairResult {
+  /** Geometry with the tabs merged in, ready to draw and to re-validate. */
+  shapes: Shapes;
+  /// The tabs that were added, in the form the validator checks.
+  bridges: ReadonlyArray<{ width_mm: number; length_mm: number; at: [number, number] }>;
 }
 
 let kernel: Kernel | null = null;
@@ -380,6 +390,25 @@ export function validate(
  */
 export function moveVertex(shapes: Shapes, edit: VertexEdit): EditResult {
   return require_().move_vertex(JSON.stringify(shapes), edit);
+}
+
+/** Grow every region that is narrower than `target_width_mm`.
+ *
+ * Both walls move outward by half the shortfall, so the total width grows
+ * by the full difference. Regions already at or above the target are left
+ * alone rather than shrunk.
+ */
+export function widenShapes(shapes: Shapes, target_width_mm: number): EditResult {
+  return require_().widen_shape_set(JSON.stringify(shapes), target_width_mm);
+}
+
+/** Move a tab between an island and the surrounding film.
+ *
+ * This is the browser half of `maskctl --bridge`. Without it the editor cannot
+ * place tabs, and without tabs the validator cannot check T-06/T-07.
+ */
+export function bridgeUnanchored(shapes: Shapes, width_mm: number, max_length_mm: number): RepairResult {
+  return require_().bridge_unanchored_islands(JSON.stringify(shapes), width_mm, max_length_mm);
 }
 
 /**
