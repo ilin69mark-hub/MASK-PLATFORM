@@ -118,7 +118,7 @@ test("a contour crossing itself is named, not measured", async () => {
   // error, and the editor used to show exactly that.
   await boot();
   const bowTie = toShapes({
-    outer: { points: [[0, 0], [10, 10], [10, 0], [0, 10]], closed: true },
+    outer: { points: [{ x: 0, y: 0 }, { x: 10, y: 10 }, { x: 10, y: 0 }, { x: 0, y: 10 }], closed: true },
     holes: [],
   });
   const r = measure(bowTie);

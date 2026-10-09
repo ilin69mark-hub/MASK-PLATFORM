@@ -10,13 +10,13 @@ import {
 import type { Shapes, TabRecord } from "../lib/kernel.ts";
 
 const FRAME: Shapes = {
-  shapes: [{ outer: { points: [[0, 0], [40, 0], [40, 40], [0, 40]], closed: true }, holes: [] }],
+  shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 0, y: 40 }], closed: true }, holes: [] }],
 };
 
 const ISLAND: Shapes = {
   shapes: [
-    { outer: { points: [[0, 0], [40, 0], [40, 40], [0, 40]], closed: true }, holes: [] },
-    { outer: { points: [[10, 10], [10, 14], [14, 14], [14, 10]], closed: true }, holes: [] },
+    { outer: { points: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 0, y: 40 }], closed: true }, holes: [] },
+    { outer: { points: [{ x: 10, y: 10 }, { x: 10, y: 14 }, { x: 14, y: 14 }, { x: 14, y: 10 }], closed: true }, holes: [] },
   ],
 };
 

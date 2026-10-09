@@ -25,7 +25,7 @@ const BEFORE: Shapes = { shapes: [] };
 const AFTER: Shapes = {
   shapes: [
     {
-      outer: { points: [[0, 0], [1, 0], [1, 1]], closed: true },
+      outer: { points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], closed: true },
       holes: [],
     },
   ],
@@ -83,7 +83,7 @@ test("two layers keep two histories", () => {
   const redAfter: Shapes = {
     shapes: [
       {
-        outer: { points: [[5, 5], [6, 5], [6, 6]], closed: true },
+        outer: { points: [{ x: 5, y: 5 }, { x: 6, y: 5 }, { x: 6, y: 6 }], closed: true },
         holes: [],
       },
     ],

@@ -49,14 +49,14 @@ export function verticesOf(shapes: Shapes, skipRepeatedFirstPoint = true): Verte
           vertex === last &&
           contour.points.length > 1 &&
           first !== undefined &&
-          point[0] === first[0] &&
-          point[1] === first[1];
+          point.x === first.x &&
+          point.y === first.y;
         if (skipRepeatedFirstPoint && repeatsFirst) return;
         out.push({
           shape: shapeIndex,
           contour: contourIndex,
           vertex,
-          at: { x: point[0], y: point[1] },
+          at: { x: point.x, y: point.y },
         });
       });
     });

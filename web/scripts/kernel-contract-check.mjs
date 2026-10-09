@@ -338,6 +338,36 @@ async function main() {
       Array.isArray(moved.measured.path_data),
     Object.keys(moved).join(",")
   );
+  // ── the shape of a vertex ───────────────────────────────────────────
+  //
+  // `Contour.points` was declared as a tuple of numbers while the kernel
+  // serialises `kernel::geom::Point` as an object. Nothing failed: the facade
+  // agreed with itself, and every test that built geometry did so the same wrong
+  // way. The Node tool then read `point[0]`, got `undefined`, and put its grab
+  // dots at `NaN` — invisible and unhittable, while the mask itself rendered fine
+  // from `path_data` and made the editor look healthy.
+  //
+  // This is the third boundary type that was a guess rather than a transcription,
+  // after `EffectiveLimits` and `TabRecord.at`. It is asserted here so a fourth
+  // has to be written deliberately.
+  const verticesAreObjects = moved.shapes.shapes.every((shape) =>
+    [shape.outer, ...shape.holes].every((contour) =>
+      contour.points.every(
+        (p) =>
+          typeof p === "object" &&
+          p !== null &&
+          typeof p.x === "number" &&
+          typeof p.y === "number" &&
+          p[0] === undefined
+      )
+    )
+  );
+  check(
+    "a vertex is an {x, y} object, not a [x, y] tuple",
+    verticesAreObjects,
+    JSON.stringify(moved.shapes.shapes[0].outer.points[0])
+  );
+
   const storedPoints = storedPointsOf(moved.shapes.shapes[0]);
   const drawnPoints = pointsInPath(moved.measured.path_data[0]);
   check(

@@ -11,11 +11,11 @@ import { canRedo, canUndo, emptyHistory, redo, undo } from "../lib/editor/histor
 import type { Shapes, VertexEdit } from "../lib/kernel.ts";
 
 const BEFORE: Shapes = {
-  shapes: [{ outer: { points: [[0, 0], [10, 0], [10, 5]], closed: true }, holes: [] }],
+  shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }], closed: true }, holes: [] }],
 };
 
 const AFTER: Shapes = {
-  shapes: [{ outer: { points: [[0, 0], [12, 0], [10, 5]], closed: true }, holes: [] }],
+  shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 10, y: 5 }], closed: true }, holes: [] }],
 };
 
 const EDIT: VertexEdit = { shape: 0, contour: 0, vertex: 1, x_mm: 12, y_mm: 0 };
@@ -69,7 +69,7 @@ test("one drag that commits many times is one undo step", () => {
       shapes,
       history,
       { ...EDIT, x_mm: x },
-      () => ({ shapes: { shapes: [{ outer: { points: [[0, 0], [x, 0], [10, 5]], closed: true }, holes: [] }] } }),
+      () => ({ shapes: { shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x, y: 0 }, { x: 10, y: 5 }], closed: true }, holes: [] }] } }),
       session
     );
     shapes = outcome.shapes;
@@ -97,7 +97,7 @@ test("ending the session makes the next edit push its own pre-state", () => {
   assert.deepEqual(first.history.past[0]?.shapes, BEFORE);
 
   const SECOND: Shapes = {
-    shapes: [{ outer: { points: [[0, 0], [14, 0], [10, 5]], closed: true }, holes: [] }],
+    shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 14, y: 0 }, { x: 10, y: 5 }], closed: true }, holes: [] }],
   };
   const second = applyVertexEdit(
     AFTER,

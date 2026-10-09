@@ -138,10 +138,10 @@ function squareShapes(): Shapes {
       {
         outer: {
           points: [
-            [0, 0],
-            [10, 0],
-            [10, 5],
-            [0, 5],
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 10, y: 5 },
+            { x: 0, y: 5 },
           ],
           closed: true,
         },
@@ -165,26 +165,68 @@ test("vertices are listed in the kernel's own numbering", () => {
   );
 });
 
+test("a vertex's coordinates come out of the geometry as real numbers", () => {
+  // This is the test that would have caught the Node tool being dead. The bug was
+  // that `Contour.points` was declared as a tuple while the kernel returns
+  // `{x, y}`, so `verticesOf` read `point[0]` and got `undefined`.
+  //
+  // It is written against the *coordinates* rather than the count, on purpose: a
+  // count-only assertion is exactly what passed while every dot sat at NaN. The
+  // geometry below is spelled the way the kernel spells it, not the way the
+  // facade used to promise.
+  const found = verticesOf(squareShapes());
+  for (const v of found) {
+    assert.ok(
+      Number.isFinite(v.at.x) && Number.isFinite(v.at.y),
+      `vertex ${v.shape}/${v.contour}/${v.vertex} is at ${v.at.x},${v.at.y}`
+    );
+  }
+  assert.deepEqual(
+    found.map((v) => [v.at.x, v.at.y]),
+    [
+      [0, 0],
+      [10, 0],
+      [10, 5],
+      [0, 5],
+    ]
+  );
+});
+
+test("a pointer over a real vertex hits it", () => {
+  // The whole tool, end to end on kernel-shaped geometry: a point one pixel to the
+  // side of a corner must return that corner. With NaN coordinates this returned
+  // nothing at all, and nothing on screen indicated why.
+  const shapes = squareShapes();
+  const corner = verticesOf(shapes)[2];
+  assert.ok(corner, "the square has a third corner");
+  const hit = hitVertex(shapes, { x: corner.at.x + 0.1, y: corner.at.y - 0.1 }, { radiusMm: 0.5 });
+  assert.ok(hit, "a vertex 0.14 mm away must be found by a 0.5 mm grab");
+  assert.deepEqual(
+    [hit.shape, hit.contour, hit.vertex],
+    [corner.shape, corner.contour, corner.vertex]
+  );
+});
+
 test("holes are numbered after the outer contour", () => {
   const withHole: Shapes = {
     shapes: [
       {
         outer: {
           points: [
-            [0, 0],
-            [20, 0],
-            [20, 20],
-            [0, 20],
+            { x: 0, y: 0 },
+            { x: 20, y: 0 },
+            { x: 20, y: 20 },
+            { x: 0, y: 20 },
           ],
           closed: true,
         },
         holes: [
           {
             points: [
-              [5, 5],
-              [5, 15],
-              [15, 15],
-              [15, 5],
+              { x: 5, y: 5 },
+              { x: 5, y: 15 },
+              { x: 15, y: 15 },
+              { x: 15, y: 5 },
             ],
             closed: true,
           },
@@ -222,10 +264,10 @@ test("two vertices the same distance away are refused rather than guessed", () =
       {
         outer: {
           points: [
-            [0, 0],
-            [10, 0.2],
-            [10, 0.4],
-            [0, 0.4],
+            { x: 0, y: 0 },
+            { x: 10, y: 0.2 },
+            { x: 10, y: 0.4 },
+            { x: 0, y: 0.4 },
           ],
           closed: false,
         },
@@ -250,10 +292,10 @@ test("a contour that closes by repeating its first point lists that point once",
       {
         outer: {
           points: [
-            [0, 0],
-            [10, 0],
-            [10, 5],
-            [0, 0],
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 10, y: 5 },
+            { x: 0, y: 0 },
           ],
           closed: true,
         },

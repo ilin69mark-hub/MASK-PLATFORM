@@ -45,14 +45,14 @@ const PROFILE: RepairProfile = {
 };
 
 const SHAPES: Shapes = {
-  shapes: [{ outer: { points: [[0, 0], [10, 0], [10, 5]], closed: true }, holes: [] }],
+  shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }], closed: true }, holes: [] }],
 };
 
 /** Identity by serialisation — the same fallback `history.ts` uses. */
 const identity = (s: Shapes): string => JSON.stringify(s);
 
 const widened: Shapes = {
-  shapes: [{ outer: { points: [[0, 0], [10, 0], [10, 5.6]], closed: true }, holes: [] }],
+  shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5.6 }], closed: true }, holes: [] }],
 };
 
 test("the repair reads its numbers from the engine's limits, not from its own defaults", () => {

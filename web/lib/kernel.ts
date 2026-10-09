@@ -11,10 +11,37 @@
  * asserted against the kernel by `engine/wasm/scripts/runtime_check.mjs`.
  */
 
+/**
+ * A point of a centreline, as `widen_centreline` takes it.
+ *
+ * A pair, not an object: this is the one place in the boundary where a tuple is
+ * true. The kernel's input for a centreline is a bare JSON array of pairs, and it
+ * is the *output* geometry that is objects.
+ */
 export type Pt = [number, number];
 
+/**
+ * A vertex of a contour, as the kernel returns it.
+ *
+ * An object, because `kernel::geom::Point` serialises as `{"x": …, "y": …}`.
+ * This was declared as `Pt` — a tuple — which type-checked against a value that
+ * never arrives. Every reader of `points` then took `point[0]` and got
+ * `undefined`: the Node tool's grab dots were positioned at `NaN`, so nothing was
+ * drawn and nothing was ever hit, while the mask itself rendered correctly from
+ * `path_data` and made the editor look healthy.
+ *
+ * That is the third time a boundary type here was a guess rather than a
+ * transcription — `EffectiveLimits` and `TabRecord.at` before it. The contract
+ * check now asserts this one, and the type follows the artifact rather than the
+ * artifact being reshaped to fit a convenient type.
+ */
+export interface Vertex {
+  x: number;
+  y: number;
+}
+
 export interface Contour {
-  points: Pt[];
+  points: Vertex[];
   closed: boolean;
 }
 
@@ -302,10 +329,10 @@ export function isLoaded(): boolean {
 export function rect(x: number, y: number, w: number, h: number): Contour {
   return {
     points: [
-      [x, y],
-      [x + w, y],
-      [x + w, y + h],
-      [x, y + h],
+      { x, y },
+      { x: x + w, y },
+      { x: x + w, y: y + h },
+      { x, y: y + h },
     ],
     closed: true,
   };
@@ -322,10 +349,10 @@ export function rect(x: number, y: number, w: number, h: number): Contour {
 export function rectCW(x: number, y: number, w: number, h: number): Contour {
   return {
     points: [
-      [x, y],
-      [x, y + h],
-      [x + w, y + h],
-      [x + w, y],
+      { x, y },
+      { x, y: y + h },
+      { x: x + w, y: y + h },
+      { x: x + w, y },
     ],
     closed: true,
   };
@@ -350,10 +377,10 @@ export function pathDataOf(shapes: Shapes, dp = 4): string[] {
   const emit = (c: Contour): string => {
     const first = c.points[0];
     if (!first) return "";
-    const head = `M ${fmt(first[0])} ${fmt(first[1])}`;
+    const head = `M ${fmt(first.x)} ${fmt(first.y)}`;
     const body = c.points
       .slice(1)
-      .map((p) => `L ${fmt(p[0])} ${fmt(p[1])}`)
+      .map((p) => `L ${fmt(p.x)} ${fmt(p.y)}`)
       .join(" ");
     return `${head}${body ? ` ${body}` : ""}${c.closed ? " Z" : ""}`;
   };

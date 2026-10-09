@@ -24,6 +24,7 @@ import {
   type Shapes,
   type TabRecord,
   type ValidationResult,
+  type Vertex,
   type VertexEdit,
   bridgeUnanchored,
   loadKernel,
@@ -76,9 +77,9 @@ export interface StudioFromFixtureProps {
 function contourFromPathData(d: string): Contour | null {
   const nums = d.match(/-?\d+(?:\.\d+)?/g);
   if (!nums || nums.length < 6) return null;
-  const points: [number, number][] = [];
+  const points: Vertex[] = [];
   for (let i = 0; i + 1 < nums.length; i += 2) {
-    points.push([Number(nums[i]), Number(nums[i + 1])]);
+    points.push({ x: Number(nums[i]), y: Number(nums[i + 1]) });
   }
   return { points, closed: d.trim().endsWith("Z") };
 }
