@@ -107,7 +107,7 @@ test("bridging passes the profile's own tab width and length", () => {
   const seen: [number, number][] = [];
   const bridge: Bridge = (_s, width, maxLength) => {
     seen.push([width, maxLength]);
-    return { shapes: SHAPES, bridges: [{ width_mm: width, length_mm: 4, at: [0, 0] }] };
+    return { shapes: SHAPES, bridges: [{ width_mm: width, length_mm: 4, at: { x: 0, y: 0 } }] };
   };
   bridgeToProfile(SHAPES, PROFILE, bridge);
   // These two are what T-06 and T-07 check. A tab narrower than 1.2 or longer
@@ -119,15 +119,15 @@ test("bridging reports each tab it placed, not a bare count", () => {
   const bridge: Bridge = () => ({
     shapes: widened,
     bridges: [
-      { width_mm: 1.2, length_mm: 4.0, at: [1, 1] },
-      { width_mm: 1.4, length_mm: 9.5, at: [8, 2] },
+      { width_mm: 1.2, length_mm: 4.0, at: { x: 1, y: 1 } },
+      { width_mm: 1.4, length_mm: 9.5, at: { x: 8, y: 2 } },
     ],
   });
   const outcome = bridgeToProfile(SHAPES, PROFILE, bridge);
   assert.equal(outcome.kind, "bridged");
   if (outcome.kind !== "bridged") return;
   assert.equal(outcome.bridges.length, 2);
-  assert.deepEqual(outcome.bridges[1], { width_mm: 1.4, length_mm: 9.5, at: [8, 2] });
+  assert.deepEqual(outcome.bridges[1], { width_mm: 1.4, length_mm: 9.5, at: { x: 8, y: 2 } });
   // The message quotes the worst tab against the profile's own limits, so the
   // user sees the number the validator will use.
   assert.match(outcome.message, /1\.400/);

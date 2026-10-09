@@ -4,6 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 
 import { StudioCanvas } from "@/components/StudioCanvas";
 import { applyVertexEdit, beginSession, endSession, idleSession, type DragSession } from "@/lib/editor/applyEdit";
+import {
+  buildEvaluationBundle,
+  refusedView,
+  verdictView,
+  type BundleLayer,
+  type VerdictView,
+} from "@/lib/editor/bundle";
 import { emptyHistory, pushEdit, redo, undo, type History } from "@/lib/editor/history";
 import {
   bridgeToProfile,
@@ -15,13 +22,17 @@ import {
 import {
   type Contour,
   type Shapes,
+  type TabRecord,
+  type ValidationResult,
   type VertexEdit,
   bridgeUnanchored,
   loadKernel,
   limits,
   moveVertex,
+  nestAndValidate,
   toShapes,
   union,
+  validate,
   widen,
   widenShapes,
 } from "@/lib/kernel";
@@ -105,6 +116,13 @@ export function StudioFromFixture({
   // What the last repair did, so the user can see what was changed rather than
   // infer it from the canvas.
   const [repair, setRepair] = useState<RepairOutcome | null>(null);
+  // The tabs each layer was built with, and the geometry they were measured
+  // against. T-06 and T-07 read these and nothing else, so a layer that drops
+  // them validates with no tabs in it and no complaint. `tabsAgainst` is what
+  // makes a moved vertex refuse the check rather than pass it.
+  const [tabsByLayer, setTabsByLayer] = useState<(readonly TabRecord[] | null)[]>([]);
+  const [tabsGeometry, setTabsGeometry] = useState<(Shapes | null)[]>([]);
+  const [verdict, setVerdict] = useState<VerdictView | null>(null);
   // The geometry as it was when the current drag began, so one drag is one
   // undo step even though it commits on every pointer move.
   const [session, setSession] = useState<DragSession>(idleSession());
@@ -136,6 +154,8 @@ export function StudioFromFixture({
           setShapesByLayer(built);
           setHistories(built.map(() => emptyHistory<Shapes>()));
           setEdited(built.map(() => false));
+          setTabsByLayer(built.map(() => null));
+          setTabsGeometry(built.map(() => null));
           setProfile(derived);
           setReady(true);
         }
@@ -154,7 +174,7 @@ export function StudioFromFixture({
     if (current) setSession(beginSession(current));
   }, [shapesByLayer, active]);
 
-  const handleDragEnd = useCallback(() => {
+  const endDrag = useCallback(() => {
     setSession(endSession());
   }, []);
 
@@ -237,16 +257,88 @@ export function StudioFromFixture({
     const current = shapesByLayer[active];
     if (!current || !profile) return;
     try {
-      applyRepair(
-        current,
-        bridgeToProfile(current, profile, (s, widthMm, maxLengthMm) =>
-          bridgeUnanchored(s, widthMm, maxLengthMm)
-        )
+      const outcome = bridgeToProfile(current, profile, (s, widthMm, maxLengthMm) =>
+        bridgeUnanchored(s, widthMm, maxLengthMm)
       );
+      if (outcome.kind === "bridged") {
+        // The records and the geometry they describe. Both are needed: the
+        // records are what T-06 and T-07 read, and the geometry is what proves
+        // they still describe this mask rather than an earlier one.
+        setTabsByLayer((prev) => prev.map((v, i) => (i === active ? outcome.bridges : v)));
+        setTabsGeometry((prev) => prev.map((v, i) => (i === active ? outcome.shapes : v)));
+      }
+      applyRepair(current, outcome);
     } catch (e) {
       setEditError(e instanceof Error ? e.message : String(e));
     }
   }, [shapesByLayer, profile, applyRepair]);
+
+  /**
+   * Run the validator over every layer, not just the selected one.
+   *
+   * A verdict about one layer out of thirteen is not a verdict about the project:
+   * T-12 crosses two layers, and the field rule applies to every tile. The bundle
+   * is assembled from all of them, and a layer whose tabs no longer match its
+   * geometry refuses the whole run — a green tick on the other twelve would be
+   * worse than nothing, because it would be believed.
+   */
+  const runValidation = useCallback(
+    (nest: boolean) => {
+      const built: BundleLayer[] = layers.map((layer, i) => ({
+        index: layer.index,
+        name: layer.name,
+        shapes: shapesByLayer[i] ?? toShapes(),
+        tabs: tabsByLayer[i] ?? null,
+        tabsAgainst: tabsGeometry[i] ?? null,
+      }));
+      const result = buildEvaluationBundle(built);
+      if (!result.ok) {
+        setVerdict(refusedView(result.problem));
+        return;
+      }
+      try {
+        const report: ValidationResult = nest
+          ? nestAndValidate(result.bundle, materialJson, plotterJson)
+          : validate(result.bundle, materialJson, plotterJson);
+        setVerdict(
+          verdictView(
+            report.verdict,
+            report.messages,
+            report.nested_layers,
+            report.limits_physically_verified
+          )
+        );
+      } catch (e) {
+        // The kernel refusing the bundle is a refusal, not a crash: it means the
+        // document is not one this entry can check. Showing it as an error state
+        // would leave the previous verdict on screen looking current.
+        setVerdict(
+          verdictView("FATAL", [e instanceof Error ? e.message : String(e)], [], false)
+        );
+      }
+    },
+    [layers, shapesByLayer, tabsByLayer, tabsGeometry, materialJson, plotterJson]
+  );
+
+  const handleVerify = useCallback(() => runValidation(false), [runValidation]);
+  const handleVerifyNested = useCallback(() => runValidation(true), [runValidation]);
+
+  /**
+   * Releasing a vertex re-runs the check, once.
+   *
+   * Not on every pointer move — a drag commits per frame and each one is a full
+   * validation over every layer. Once the pointer is up is the first moment the
+   * geometry is the geometry the user meant, and it is the moment the previous
+   * verdict stops being true.
+   *
+   * Deliberately the plain check, not the nested one: the user has not chosen to
+   * cut a layer into tiles, and a verdict that improved because of a decision
+   * nobody made is the thing the validator goes out of its way to disclose.
+   */
+  const handleDragEnd = useCallback(() => {
+    endDrag();
+    runValidation(false);
+  }, [endDrag, runValidation]);
 
   if (error) {
     return (
@@ -301,6 +393,7 @@ export function StudioFromFixture({
           canRedo={(histories[active]?.future.length ?? 0) > 0}
           canRepair={profile !== null}
           repair={repair}
+          verdict={verdict}
           onEdit={handleEdit}
           onDragBegin={handleDragBegin}
           onDragEnd={handleDragEnd}
@@ -308,6 +401,8 @@ export function StudioFromFixture({
           onRedo={handleRedo}
           onWiden={handleWiden}
           onBridge={handleBridge}
+          onVerify={handleVerify}
+          onVerifyNested={handleVerifyNested}
         />
       )}
     </div>

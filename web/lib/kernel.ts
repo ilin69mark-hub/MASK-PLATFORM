@@ -189,12 +189,28 @@ export interface VertexEdit {
   y_mm: number;
 }
 
+/** One tab, in the form the validator reads it. */
+export interface TabRecord {
+  /** Perpendicular width of the neck. T-06 compares this. */
+  width_mm: number;
+  /** Span between the island and the film holding it. T-07 compares this. */
+  length_mm: number;
+  /**
+   * Where the tab meets the surrounding film.
+   *
+   * An object, not a `[x, y]` tuple: it is `kernel::geom::Point`, which
+   * serialises as `{"x": …, "y": …}`. A tuple would type-check against a value
+   * that never arrives, and `at[0]` on it would be `undefined` at runtime.
+   */
+  at: { x: number; y: number };
+}
+
 /** The result of an auto-fix pass: repaired geometry plus what was done to it. */
 export interface RepairResult {
   /** Geometry with the tabs merged in, ready to draw and to re-validate. */
   shapes: Shapes;
-  /// The tabs that were added, in the form the validator checks.
-  bridges: ReadonlyArray<{ width_mm: number; length_mm: number; at: [number, number] }>;
+  /** The tabs that were added, in the form the validator checks. */
+  bridges: ReadonlyArray<TabRecord>;
 }
 
 let kernel: Kernel | null = null;

@@ -441,6 +441,14 @@ async function main() {
   );
   check("every tab carries the two numbers T-06 and T-07 read", tabsPass, JSON.stringify(bridged.bridges));
   check(
+    "a tab's position is an {x, y} object, not a [x, y] tuple",
+    bridged.bridges.every((b) => typeof b.at?.x === "number" && typeof b.at?.y === "number"),
+    // The facade once declared `at: [number, number]`. It type-checked against a
+    // value that never arrives, and `at[0]` on it would have been undefined in
+    // the browser while `at.x` worked in a Rust test.
+    JSON.stringify(bridged.bridges.map((b) => Object.keys(b.at ?? {})))
+  );
+  check(
     "no tab is narrower or longer than the profile allows",
     bridged.bridges.every(
       (b) =>
@@ -467,6 +475,83 @@ async function main() {
     "an uncuttable tab is refused rather than silently placing none",
     uncuttable.length > 0,
     uncuttable
+  );
+
+  // ── the whole round trip: repair, then validate what was repaired ─────
+  //
+  // VALIDATE-001 exists because `validate()` had no call site at all. The
+  // question this answers is not "is the verdict right" — that is the
+  // validator's own tests — but "does a layer the user just repaired come back
+  // as a verdict, rather than as a document nobody looked at". An unanchored
+  // island must be reported before bridging and quiet after it; if it were
+  // quiet both times, the tabs are not reaching the rules that read them.
+  const asBundle = (shapes, bridges) => ({
+    composition: { layers: [{ index: 0, name: "рама", geometry: shapes, bridges }] },
+  });
+  const freeIsland = wasm.validate_project(
+    JSON.stringify(asBundle(JSON.parse(frame), [])),
+    material,
+    plotter
+  );
+  // The claim under test is about *this* complaint, not about the message list
+// being empty. Two notices are unconditional — the release is not modelled, and
+// the project has no curves — and they are in both runs. An assertion of
+// `messages.length === 0` would have been red for a reason that has nothing to
+// do with tabs, which is the failure this script exists to catch.
+const UNANCHORED = "не соединён с маской";
+check(
+    "an unanchored island is reported by the browser validator",
+    freeIsland.messages.some((m) => m.includes(UNANCHORED)),
+    JSON.stringify(freeIsland.messages)
+  );
+
+  const bridgedVerdict = wasm.validate_project(
+    JSON.stringify(asBundle(bridged.shapes, bridged.bridges)),
+    material,
+    plotter
+  );
+  check(
+    "bridging it clears the complaint the tabs answered",
+    !bridgedVerdict.messages.some((m) => m.includes(UNANCHORED)),
+    JSON.stringify(bridgedVerdict.messages)
+  );
+  check(
+    "the notices that have nothing to do with tabs stay put",
+    bridgedVerdict.messages.length < freeIsland.messages.length &&
+      bridgedVerdict.messages.some((m) => m.includes("Кривых в проекте нет")),
+    `${freeIsland.messages.length} before, ${bridgedVerdict.messages.length} after`
+  );
+  check(
+    "and the verdict itself is one of the four the engine defines",
+    ["PASS", "PASS_WITH_WARNINGS", "FAIL", "FATAL"].includes(bridgedVerdict.verdict),
+    bridgedVerdict.verdict
+  );
+
+  const nestedVerdict = wasm.nest_and_validate_project(
+    JSON.stringify(asBundle(bridged.shapes, bridged.bridges)),
+    material,
+    plotter
+  );
+  check(
+    "the laid-out call answers with a verdict too, not only the plain one",
+    typeof nestedVerdict.verdict === "string" && nestedVerdict.verdict.length > 0,
+    JSON.stringify(nestedVerdict)
+  );
+
+  let noGeometry = "";
+  try {
+    wasm.validate_project(
+      JSON.stringify({ composition: { layers: [{ index: 0, name: "без геометрии" }] } }),
+      material,
+      plotter
+    );
+  } catch (e) {
+    noGeometry = String(e && e.message ? e.message : e);
+  }
+  check(
+    "a layer without inline geometry is refused, per ADR-0016",
+    noGeometry.includes("inline geometry"),
+    noGeometry
   );
 
   console.log();

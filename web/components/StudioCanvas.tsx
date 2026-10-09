@@ -25,6 +25,7 @@ import {
   type DragState,
 } from "@/lib/editor/dragEdit";
 import { hitVertex } from "@/lib/editor/hitTest";
+import type { VerdictView } from "@/lib/editor/bundle";
 import type { RepairOutcome } from "@/lib/editor/repair";
 import { NodeTool } from "@/components/NodeTool";
 import {
@@ -84,6 +85,14 @@ export interface StudioProps {
   canRepair?: boolean;
   /** What the last repair did, shown so a change is never silent. */
   repair?: RepairOutcome | null;
+  /**
+   * What the validator said, or `null` when it has not been asked yet.
+   *
+   * Distinct from "no problems": the editor used to show a layer's measurements
+   * and nothing else, so a mask on screen was indistinguishable from a mask that
+   * had been checked.
+   */
+  verdict?: VerdictView | null;
   /** One vertex move, applied by the owner through the kernel. */
   onEdit?: (edit: VertexEdit) => void;
   /** A drag began: the owner snapshots the geometry for undo. */
@@ -96,6 +105,10 @@ export interface StudioProps {
   onWiden?: () => void;
   /** Anchor every free island with a tab. */
   onBridge?: () => void;
+  /** Validate as-is, with no layout. */
+  onVerify?: () => void;
+  /** Validate the way it would be printed: lay out what does not fit, then check. */
+  onVerifyNested?: () => void;
 }
 
 /**
@@ -120,6 +133,7 @@ export function StudioCanvas({
   canRedo = false,
   canRepair = false,
   repair = null,
+  verdict = null,
   onEdit,
   onDragBegin,
   onDragEnd,
@@ -127,6 +141,8 @@ export function StudioCanvas({
   onRedo,
   onWiden,
   onBridge,
+  onVerify,
+  onVerifyNested,
 }: StudioProps) {
   const [mode, setMode] = useState<ViewMode>("mask");
   const [kernelReady, setKernelReady] = useState(false);
@@ -399,7 +415,7 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
         the owner happened to wire undo — a component given a repair and nothing
         else rendered no toolbar at all, and the repairs silently did not exist.
       */}
-      {(onUndo ?? onRedo ?? onEdit ?? onWiden ?? onBridge) && (
+      {(onUndo ?? onRedo ?? onEdit ?? onWiden ?? onBridge ?? onVerify ?? onVerifyNested) && (
         <div
           className="studio-editbar"
           role="toolbar"
@@ -437,6 +453,21 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
                 Язычки
               </button>
             )}
+            {onVerify && (
+              <button type="button" onClick={onVerify} data-testid="verify-button">
+                Проверить
+              </button>
+            )}
+            {onVerifyNested && (
+              <button
+                type="button"
+                onClick={onVerifyNested}
+                data-testid="verify-nested-button"
+                title="Разложить слои, которые не помещаются, и проверить раскладку"
+              >
+                С раскладкой
+              </button>
+            )}
             {onUndo && (
               <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Отменить">
                 Отменить
@@ -454,6 +485,8 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
           )}
         </div>
       )}
+
+      {verdict && <VerdictPanel view={verdict} />}
 
       {repair && (
         <p
@@ -530,6 +563,57 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
         />
       </footer>
     </div>
+  );
+}
+
+/**
+ * What the validator said.
+ *
+ * `role="status"` rather than `alert`: a FAIL is an answer to a question the user
+ * asked, not an emergency, and an alert would interrupt them mid-edit.
+ *
+ * The `limits_physically_verified` line is not decoration. A PASS means the mask
+ * clears the thresholds the profile carries, and a profile whose thresholds came
+ * from a datasheet has never been cut. Showing the green verdict without that
+ * would let the editor speak for the material.
+ */
+function VerdictPanel({ view }: { view: VerdictView }) {
+  const failed = view.kind === "refused" || view.headline === "Не годно";
+  return (
+    <section
+      role="status"
+      data-testid="verdict-panel"
+      aria-label="Результат проверки"
+      style={{ padding: "0 1.5rem", color: "#333" }}
+    >
+      <p style={{ margin: "0.4rem 0", fontWeight: 600 }}>
+        {view.headline}
+        {view.nestedLayers.length > 0 && (
+          <span className="muted">
+            {" "}
+            · разложено слоёв: {view.nestedLayers.join(", ")}
+          </span>
+        )}
+      </p>
+      {!view.limitsVerified && (
+        <p className="muted" data-testid="limits-unverified" style={{ margin: "0.2rem 0" }}>
+          Пределы взяты из datasheet и не подтверждены вырезом реального материала.
+        </p>
+      )}
+      {view.messages.length === 0 ? (
+        <p className="muted" style={{ margin: "0.2rem 0" }}>
+          Замечаний нет.
+        </p>
+      ) : (
+        <ul style={{ margin: "0.2rem 0", paddingLeft: "1.2rem" }}>
+          {view.messages.map((m, i) => (
+            <li key={i} style={failed ? { color: "#c00" } : undefined}>
+              {m}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

@@ -159,7 +159,7 @@ test("a placed tab is reported with its own measurements, against the profile's 
       repair: {
         kind: "bridged",
         shapes: CANVAS.shapes,
-        bridges: [{ width_mm: 1.2, length_mm: 4.5, at: [0, 0] }],
+        bridges: [{ width_mm: 1.2, length_mm: 4.5, at: { x: 0, y: 0 } }],
         message: "Язычков: 1 · ширина до 1.200 мм (минимум 1.200) · длина до 4.500 мм (максимум 25.000).",
       },
     })
@@ -169,4 +169,86 @@ test("a placed tab is reported with its own measurements, against the profile's 
   assert.ok(html.includes("1.200"));
   assert.ok(html.includes("4.500"));
   assert.ok(html.includes("25.000"));
+});
+
+test("the verdict is shown as an answer, with the thresholds' own caveat", () => {
+  // A PASS over unverified limits is the editor speaking for the material. The
+  // datasheet line is what stops a green headline meaning "cut this".
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      verdict: {
+        kind: "verdict",
+        headline: "Годно к вырезанию",
+        messages: [],
+        nestedLayers: [],
+        limitsVerified: false,
+      },
+    })
+  );
+
+  assert.ok(html.includes('data-testid="verdict-panel"'));
+  assert.ok(html.includes("Годно к вырезанию"));
+  assert.ok(html.includes('data-testid="limits-unverified"'));
+  assert.ok(html.includes("datasheet"));
+  assert.ok(!html.includes('role="alert"'), "a verdict is an answer, not an emergency");
+});
+
+test("a verified profile drops the caveat rather than repeating it as fact", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      verdict: {
+        kind: "verdict",
+        headline: "Годно к вырезанию",
+        messages: [],
+        nestedLayers: [],
+        limitsVerified: true,
+      },
+    })
+  );
+  assert.ok(!html.includes('data-testid="limits-unverified"'));
+});
+
+test("the layers a layout had to move are named, not just counted", () => {
+  // A verdict that improved because a layer was cut into tiles reads as "it
+  // always passed" unless the reader can see which layers moved.
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      verdict: {
+        kind: "verdict",
+        headline: "Годно с замечаниями",
+        messages: ["слой 2 разложен"],
+        nestedLayers: [2, 5],
+        limitsVerified: true,
+      },
+    })
+  );
+  assert.ok(html.includes("разложено слоёв: 2, 5"));
+  assert.ok(html.includes("слой 2 разложен"));
+});
+
+test("a refusal reads as a refusal and shows its reason", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StudioCanvas, {
+      ...CANVAS,
+      verdict: {
+        kind: "refused",
+        headline: "Проверка не выполнена",
+        messages: ["Геометрия слоя «панель» изменилась после постановки язычков."],
+        nestedLayers: [],
+        limitsVerified: false,
+      },
+    })
+  );
+  assert.ok(html.includes("Проверка не выполнена"));
+  assert.ok(html.includes("изменилась после постановки язычков"));
+});
+
+test("no verdict yet is not the same as a clean one", () => {
+  // The editor used to show measurements and nothing else, so a mask on screen
+  // looked like a mask that had been checked.
+  const html = renderToStaticMarkup(React.createElement(StudioCanvas, CANVAS));
+  assert.ok(!html.includes('data-testid="verdict-panel"'));
 });
