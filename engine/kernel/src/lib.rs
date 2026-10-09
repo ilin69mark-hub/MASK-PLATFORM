@@ -20,6 +20,7 @@ pub mod measure;
 pub mod offset;
 pub mod raster;
 pub mod region_cache;
+pub mod surface;
 
 pub use boolean::{difference, intersection, normalise, union, xor, OverlayError};
 pub use canonical::{canonicalise, canonicalise_shapes, to_path_data};
@@ -42,3 +43,4 @@ pub use measure::{
 pub use offset::{
     lib_math_mode, min_width, narrowest_neck, offset_shape, survives_inward_offset, widen,
 };
+pub use surface::{developable, surface_point, width_variation, SurfacePoint, DEVELOPABLE_STRAIN};
