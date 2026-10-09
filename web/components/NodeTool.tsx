@@ -40,22 +40,27 @@ export function NodeTool({ shapes, radiusMm, grabbed, pointerMm }: NodeToolProps
 
   return (
     <g className="node-tool" data-testid="node-tool" pointerEvents="none">
-      {shown.map((v) => (
-        <circle
-          key={`${v.shape}-${v.contour}-${v.vertex}`}
-          cx={v.at.x}
-          cy={v.at.y}
-          r={radiusMm}
-          fill={
-            grabbed &&
-            v.shape === grabbed.shape &&
-            v.contour === grabbed.contour &&
-            v.vertex === grabbed.vertex
-              ? "#c41820"
-              : "#0a7"
-          }
-        />
-      ))}
+      {shown.map((v) => {
+        const held =
+          grabbed !== null &&
+          v.shape === grabbed.shape &&
+          v.contour === grabbed.contour &&
+          v.vertex === grabbed.vertex;
+        return (
+          <circle
+            key={`${v.shape}-${v.contour}-${v.vertex}`}
+            cx={v.at.x}
+            cy={v.at.y}
+            // Bigger as well as red. A grab that is only a colour change is easy
+            // to miss on a mask with two dozen dots, and a dot that grows under
+            // the cursor says "this one, and it is yours" without reading
+            // anything.
+            r={held ? radiusMm * 1.6 : radiusMm}
+            fill={held ? "#c41820" : "#0a7"}
+            data-grabbed={held ? "true" : undefined}
+          />
+        );
+      })}
     </g>
   );
 }

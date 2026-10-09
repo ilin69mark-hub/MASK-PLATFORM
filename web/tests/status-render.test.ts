@@ -14,6 +14,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { test } from "node:test";
 
 import { StatusBar, StudioCanvas, type StudioProps } from "../components/StudioCanvas.tsx";
+import { NodeTool } from "../components/NodeTool.tsx";
 import type { LayerResult, Shapes } from "../lib/kernel.ts";
 
 test("a kernel-load failure is rendered as an alert rather than loading", () => {
@@ -288,4 +289,62 @@ test("the Node toggle carries the state it is switched to", () => {
       /aria-pressed="true"[^>]*data-testid="node-tool-toggle"/.test(html),
     `the toggle must announce it is on: ${html}`
   );
+});
+
+test("the grabbed vertex is red and larger than the rest", () => {
+  // The only feedback a grab gives is this dot. It was already red in the source,
+  // which is why its absence proved the grab was never happening rather than
+  // that the highlight was missing. It is now also bigger, because a colour
+  // change alone is easy to miss among two dozen green dots, and a dot that grows
+  // under the cursor says which one is held without reading anything.
+  const geometry: Shapes = {
+    shapes: [
+      {
+        outer: {
+          points: [
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 10, y: 5 },
+            { x: 0, y: 5 },
+          ],
+          closed: true,
+        },
+        holes: [],
+      },
+    ],
+  };
+  const grabbed = { shape: 0, contour: 0, vertex: 1, at: { x: 10, y: 0 } };
+  const html = renderToStaticMarkup(
+    React.createElement(NodeTool, {
+      shapes: geometry,
+      radiusMm: 1,
+      grabbed,
+      pointerMm: null,
+    })
+  );
+  const dots = html.match(/<circle[^>]*>/g) ?? [];
+  assert.equal(dots.length, 4);
+  const held = dots.filter((d) => d.includes('data-grabbed="true"'));
+  assert.equal(held.length, 1, `exactly one dot is held: ${html}`);
+  assert.ok(held[0]?.includes('fill="#c41820"'), `held dot must be red: ${held[0]}`);
+  assert.ok(held[0]?.includes('r="1.6"'), `held dot must be larger: ${held[0]}`);
+  for (const d of dots) {
+    if (!d.includes('data-grabbed')) assert.ok(d.includes('fill="#0a7"'), `held ones are red: ${d}`);
+  }
+});
+
+test("with nothing grabbed no dot claims to be held", () => {
+  const geometry: Shapes = {
+    shapes: [{ outer: { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }], closed: true }, holes: [] }],
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(NodeTool, {
+      shapes: geometry,
+      radiusMm: 1,
+      grabbed: null,
+      pointerMm: null,
+    })
+  );
+  assert.ok(!html.includes('data-grabbed'), "nothing is held, so nothing says it is");
+  assert.ok(!html.includes("#c41820"), "and nothing is red");
 });

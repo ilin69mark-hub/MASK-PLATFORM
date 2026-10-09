@@ -65,6 +65,32 @@ export function verticesOf(shapes: Shapes, skipRepeatedFirstPoint = true): Verte
 }
 
 /**
+ * How far the nearest vertex is, in millimetres.
+ *
+ * Reported when a grab misses. A tool that says nothing when the pointer lands
+ * 2 mm from a vertex and a tool that says nothing when it lands 400 mm from one
+ * are the same silence, and they are not the same fault: the first is a radius
+ * too tight, the second means the coordinates the pointer is converted through
+ * are not the coordinates the dots are drawn in. Without the number, both look
+ * like "the tool is broken", which is what it was being reported as.
+ *
+ * `null` for geometry with no vertices, where there is nothing to be near.
+ */
+export function nearestVertexMm(
+  shapes: Shapes,
+  at: Point2D,
+  options: HitTestOptions = { radiusMm: 0 }
+): number | null {
+  const vertices = verticesOf(shapes, options.skipRepeatedFirstPoint ?? true);
+  let best: number | null = null;
+  for (const vertex of vertices) {
+    const distance = Math.hypot(vertex.at.x - at.x, vertex.at.y - at.y);
+    if (best === null || distance < best) best = distance;
+  }
+  return best;
+}
+
+/**
  * The nearest vertex within the radius, or nothing.
  *
  * Ties are refused rather than resolved: two vertices of a thin band can be closer

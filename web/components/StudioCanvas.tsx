@@ -25,7 +25,7 @@ import {
   shouldCommit,
   type DragState,
 } from "@/lib/editor/dragEdit";
-import { hitVertex } from "@/lib/editor/hitTest";
+import { hitVertex, nearestVertexMm } from "@/lib/editor/hitTest";
 import type { VerdictView } from "@/lib/editor/bundle";
 import type { RepairOutcome } from "@/lib/editor/repair";
 import { NodeTool } from "@/components/NodeTool";
@@ -254,6 +254,15 @@ export function StudioCanvas({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [drag, setDrag] = useState<DragState>(idleDrag());
   const [pointerMm, setPointerMm] = useState<Point2D | null>(null);
+  // Why a grab missed, in the editor's own millimetres. A pointer that lands 2 mm
+  // from a vertex and one that lands 400 mm from it are the same silence, and
+  // they are not the same fault.
+  const [miss, setMiss] = useState<string | null>(null);
+  // Live proof that the pointer reaches the canvas and that its position is
+  // converted through the same rectangle the dots are drawn in. Without it, "the
+  // tool does nothing" has no way to be told apart from "the pointer never
+  // arrives", and those are different faults in different layers.
+  const [pointerReadout, setPointerReadout] = useState<string | null>(null);
   const dragRef = useRef<DragState>(idleDrag());
   dragRef.current = drag;
   const lastMmRef = useRef<Point2D | null>(null);
@@ -327,6 +336,7 @@ export function StudioCanvas({
       dragRef.current = next;
       lastMmRef.current = at;
       setPointerMm(at);
+      setMiss(grabbed ? null : describeMiss(shapes, at, grabRadiusMm));
       if (grabbed) {
         onDragBegin?.();
         // Keep the moves coming to this element even off the vertices.
@@ -343,6 +353,9 @@ export function StudioCanvas({
       const state = dragRef.current;
       if (!state.grabbed) {
         lastMmRef.current = at;
+        setPointerReadout(
+          `указатель: ${at.x.toFixed(1)}; ${at.y.toFixed(1)} мм · захват ${grabRadiusMm.toFixed(3)} мм`
+        );
         return;
       }
       setPointerMm(at);
@@ -359,7 +372,7 @@ export function StudioCanvas({
         if (edit) onEdit?.(edit);
       }
     },
-    [toMm, onEdit]
+    [toMm, onEdit, grabRadiusMm]
   );
 
   const endNodeDrag = useCallback(() => {
@@ -511,6 +524,25 @@ ${pathData.map((d) => `    <path d="${d}"/>`).join("\n")}
 
       {verdict && <VerdictPanel view={verdict} />}
 
+      {pointerReadout && nodeTool && (
+        <p
+          data-testid="pointer-readout"
+          style={{ padding: "0 1.5rem", margin: "0.3rem 0 0", color: "#666", fontSize: "0.8rem" }}
+        >
+          {pointerReadout}
+        </p>
+      )}
+
+      {miss && (
+        <p
+          role="status"
+          data-testid="grab-miss"
+          style={{ padding: "0 1.5rem", margin: "0.3rem 0 0", color: "#a15c00" }}
+        >
+          {miss}
+        </p>
+      )}
+
       {repair && (
         <p
           role="status"
@@ -647,6 +679,36 @@ function VerdictPanel({ view }: { view: VerdictView }) {
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * What to say when a grab found no vertex.
+ *
+ * The number is the whole point. "Nothing happened" is what a tool says when the
+ * pointer is two millimetres off a vertex and also when it is four hundred — and
+ * those are a tight radius and a broken coordinate mapping respectively. Saying
+ * which one it was costs one line and turns an unreportable fault into one that
+ * can be fixed.
+ */
+function describeMiss(
+  shapes: Shapes,
+  at: Point2D,
+  radiusMm: number
+): string {
+  const nearest = nearestVertexMm(shapes, at);
+  if (nearest === null) return "Здесь нет ни одной вершины.";
+  if (nearest <= radiusMm * 1.5) {
+    // Close enough that the radius is the reason, whatever the tie rule did.
+    return (
+      `Мимо: ближайшая вершина в ${nearest.toFixed(3)} мм, ` +
+      `захват ${radiusMm.toFixed(3)} мм — наведите точнее.`
+    );
+  }
+  return (
+    `Мимо: ближайшая вершина в ${nearest.toFixed(1)} мм, ` +
+    `захват ${radiusMm.toFixed(3)} мм. Это слишком далеко — указатель и точки ` +
+    "считаются в разных координатах."
   );
 }
 

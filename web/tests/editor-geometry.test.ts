@@ -11,8 +11,8 @@ import {
   type DrawnSizePx,
   type ViewBoxMm,
 } from "../lib/editor/viewTransform.ts";
-import { hitVertex, verticesOf } from "../lib/editor/hitTest.ts";
-import type { Shapes } from "../lib/kernel.ts";
+import { hitVertex, nearestVertexMm, verticesOf } from "../lib/editor/hitTest.ts";
+import { toShapes, type Shapes } from "../lib/kernel.ts";
 
 /** A viewBox in millimetres and the pixels it is drawn into. */
 function box(view: Partial<ViewBoxMm> = {}, drawn: Partial<DrawnSizePx> = {}) {
@@ -350,4 +350,24 @@ test("the view carries the origin, so dots and pointers agree", () => {
   const back = pxToMm(px, view, drawn);
   assert.ok(Math.abs(back.x - corner.x) < 1e-9, `x came back as ${back.x}`);
   assert.ok(Math.abs(back.y - corner.y) < 1e-9, `y came back as ${back.y}`);
+});
+
+test("a missed grab reports how far the nearest vertex was", () => {
+  // The silence this replaces is what made the fault unreportable: nothing
+  // happened whether the pointer was 2 mm off a vertex or four hundred.
+  const shapes = squareShapes();
+  // From just inside the first corner: the nearest vertex is that corner, at the
+  // distance to it — not zero, which is what I first wrote and asserted wrongly.
+  assert.ok(
+    Math.abs((nearestVertexMm(shapes, { x: 0.2, y: 0.2 }) ?? -1) - Math.hypot(0.2, 0.2)) < 1e-12,
+    "the nearest vertex of a square from (0.2,0.2) is its corner"
+  );
+  assert.ok(
+    Math.abs((nearestVertexMm(shapes, { x: 1, y: 1 }) ?? 0) - Math.hypot(1, 1)) < 1e-12,
+    "the nearest vertex of a square from (1,1) is a corner"
+  );
+  // Far away, and beyond every vertex — the case that means the coordinates are
+  // wrong rather than the aim.
+  assert.ok((nearestVertexMm(shapes, { x: 500, y: 500 }) ?? 0) > 100);
+  assert.equal(nearestVertexMm(toShapes(), { x: 0, y: 0 }), null, "no vertices, no distance");
 });
