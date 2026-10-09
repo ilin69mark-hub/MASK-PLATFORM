@@ -944,6 +944,48 @@ fn run(args: &Args) -> Result<bool, String> {
         manifest_json.len()
     );
 
+    // The instruction is the document a person actually follows at the bench, so
+    // it is generated from the same data as the files next to it. It is refused
+    // rather than written when a figure cannot be traced, because an
+    // instruction with one untraceable number is worse than no instruction: it
+    // reads as authoritative.
+    let instruction =
+        mask_export::instruction::render_markdown(&mask_export::instruction::InstructionInput {
+            project_id: &fixture.project_id,
+            revision: fixture.revision,
+            engine_version: env!("CARGO_PKG_VERSION"),
+            material: &material,
+            plotter: &plotter,
+            report: &report,
+            tiles: (!plans.is_empty()).then(|| {
+                plans
+                    .iter()
+                    .map(|(_, _, p)| p.summary.tile_count as u32)
+                    .sum()
+            }),
+        });
+    if let Err(unverified) = mask_export::instruction::verify(&instruction) {
+        let detail = unverified
+            .iter()
+            .map(|u| u.text.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("инструкция не прошла сверку чисел: {detail}"));
+    }
+    let instruction_file = format!(
+        "{}_rev{}_instruction.md",
+        fixture.project_id, fixture.revision
+    );
+    let instruction_path = args.out_dir.join(&instruction_file);
+    fs::write(&instruction_path, &instruction.text)
+        .map_err(|e| format!("cannot write {}: {e}", instruction_path.display()))?;
+    println!(
+        "  wrote {} ({} bytes, {} figure(s) traced)",
+        instruction_path.display(),
+        instruction.text.len(),
+        instruction.uses.len()
+    );
+
     println!(
         "  {} file(s), {} bytes total{}",
         written,

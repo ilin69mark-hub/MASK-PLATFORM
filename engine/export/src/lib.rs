@@ -9,6 +9,7 @@
 //! iteration order, fixed decimal precision.
 
 pub mod dxf;
+pub mod instruction;
 pub mod manifest;
 pub mod plt;
 
