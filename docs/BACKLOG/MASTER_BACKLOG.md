@@ -27,15 +27,19 @@
 
 | Статус | Кол-во |
 |---|---|
-| DONE | 30 |
+| DONE | 31 |
 | TODO | 8 |
 | BLOCKED | 2 |
 | NOT NEEDED | 1 |
-| **Всего** | **41** |
+| **Всего** | **42** |
 
 | По приоритету | P0 | P1 | P2 | P3 |
 |---|---|---|---|---|
-| TODO | 2 | 4 | 2 | 0 |
+| TODO | 2 | 3 | 3 | 0 |
+
+Счётчики не считают блок **GEOMETRY CORE RESEARCH** ниже: он добавлен
+исследованием, ещё не проходил сверку с кодом и не встроен в волны. Его решение
+и границы не подтверждены — см. **DOC-008**.
 
 ---
 
@@ -138,16 +142,41 @@ DOM-окружения в проекте нет, а `react-dom/server` толь�
 (мм ↔ экран), `hitTest`, `dragEdit`, `history`. Тестируются в `node:test` без
 браузера.
 
-### TOOL-003 · Инструменты Widen и Bridge · P1 · MEDIUM · M + S
+### TOOL-003 · Инструменты Widen и Bridge · DONE 2026-10-09
 
-`bridge_unanchored_islands` в wasm уже есть и возвращает записи о язычках, которые
-проверяет T-06/T-07; значение `bridge_length_mm` уже лежит в ответе
-`effective_limits`, в TS-интерфейсе оно просто не объявлено. Bridge — это авто-фикс
-островков, и в браузере он впервые становится доступен пользователю.
+`bridge_unanchored_islands` в wasm уже был и возвращал записи о язычках, которые
+проверяет T-06/T-07; значение `bridge_length_mm` лежало в ответе
+`effective_limits`, в TS-интерфейсе оно просто не было объявлено. Bridge — это
+авто-фикс островков, и в браузере он впервые стал доступен пользователю.
 
-`Widen` требует нового экспорта: `widen_centreline` умеет только центральную
-линию, а инструмент расширяет выбранный контур — `offset_shape` на половину
-разницы целевой и измеренной ширины.
+`Widen` потребовал нового экспорта: `widen_centreline` умел только центральную
+линию, а инструмент расширяет готовую область — `offset_shape` на половину
+разницы целевой и измеренной ширины. Меряется минимум из `min_width` и
+`narrowest_neck`, иначе инструмент рапортовал бы об успехе, оставив шейку уже
+минимума материала — это BUG-019 в форме инструмента.
+
+Найдено по ходу, три дефекта, все в том же коде:
+
+* **`EffectiveLimits` объявлял 11 полей из 19.** `rules::EffectiveLimits`
+  возвращал все девятнадцать, TS — одиннадцать. Ничего не падало: TypeScript
+  возражает только на поле, которое нужно и не найдено. Добавлены восемь
+  отсутствовавших, `kernel-contract-check` теперь проверяет все девятнадцать.
+  Список проверки был массивом имён под `typeof === "number"`, что неверно для
+  `peel_rate` — он свободный текст по замыслу; проверка стала таблицей
+  «поле → тип».
+* **Тулбар правок рисовался по условию `onUndo ?? onRedo`.** Компонент, которому
+  передали ремонт, но не отмену, не показал бы панель вовсе — кнопки молча
+  существовали бы, но их не было бы видно. Условие расширено до любого
+  редактирующего действия.
+* **Номер прогона.** `page.tsx` читал только профиль материала, а
+  `effective_limits` выводится из материала **и** плоттера. Страница теперь
+  читает и его, и передаёт обе строки: пределы выводит ядро, а не серверная
+  страница — иначе это второе выведение, которое придётся держать в согласии.
+
+Проверено не только наличие экспортов: контрактная проверка прогоняет оба
+ремонта через настоящий wasm-артефакт — усык 0.2 мм расширяется до минимума
+материала, рамка с островком получает язычок, и каждый язычок проходит те же два
+числа, что читает T-06/T-07.
 
 ### VALIDATE-001 · Валидация в UI не вызывается вообще · P1 · HIGH · M
 
@@ -697,7 +726,8 @@ BUG-015 · DONE ──> narrowest_neck: искать первую границу
 
 Волна 7 — инструменты Stage 6:
 
-BUG-018, BUG-019 ──> TOOL-001 ──> TOOL-002 ──> TOOL-003 ──> VALIDATE-001 ──> PERF-003 ──> PERF-002
+BUG-018, BUG-019 ──> TOOL-001 · DONE ──> TOOL-002 · DONE ──> TOOL-003 · DONE
+  ──> VALIDATE-001 ──> PERF-003 ──> PERF-002
 ```
 
 ---
@@ -730,6 +760,330 @@ PERF-003 пересматривается PERF-002. Порядок не прои
 стать правдивым до того, как пользователь будет на него смотреть, а запись
 геометрии — раньше, чем инструменты, которым нечего изменять.
 
+**Состояние на 2026-10-09.** BUG-018, BUG-019, TOOL-001, TOOL-002 и TOOL-003
+закрыты. Дальше — **VALIDATE-001**: `validate()` и `nestAndValidate()` до сих пор
+не имеют ни одной точки вызова, редактор показывает измерение одного слоя, но не
+показывает вердикт.
+
 Открытым также остаются два внешних блокера: BLOCK-001 и BLOCK-002.
 
 Правило: задача не начинается, пока не выполнены её зависимости.
+
+---
+
+## P2 — неподтверждённое
+
+### DOC-008 · Блок GEOMETRY CORE RESEARCH не прошёл сверку с кодом · P2 · MEDIUM · S
+
+В конец файла влиты десять задач `GEOM-010 … GEOM-100`, добавленных по
+исследованию open-source геометрических ядер. Блок не проходил правила этого
+файла и в счётчики не входит.
+
+Что не так, по пунктам:
+
+* **Язык и форма.** Весь бэклог написан по-русски, этот блок — по-английски.
+  Отличается и форма: вместо «доказательство → последствие → закрыто» там
+  `Description` / `Acceptance criteria` / `Definition of Done`, как в чужом
+  трекере.
+* **Разделителя не было.** Блок начинался сразу после строки «Правило: задача не
+  начинается, пока не выполнены её зависимости», без пустой строки — заголовок
+  приклеивался к тексту.
+* **Не встроен ни в одну волну.** Ни в графе зависимостей, ни в порядке волн.
+  Задачи без места в порядке не имеют зависимостей — а у них они объявлены
+  (`GEOM-030` зависит от `GEOM-010`).
+* **Часть критериев не проверяема кодом.** «< 5 с на 200k треугольников»,
+  «99.9% успешных прогонов», «демо-видео или скриншот» — это пожелания, а не
+  критерии, которые можно закрыть прогоном.
+* **Решение не принято.** Решение **A1** — ядро и Studio, сервисный слой отложен
+  и в ближайших волнах не планируется. Блок предлагает Go C ABI, gRPC и
+  коммерческий CGAL. Это не детализация A1, это другое направление, и оно
+  сейчас противоречит принятому.
+
+Что предлагается решить, а не молча удалить: блок либо переносится в отдельный
+файл с явной пометкой «направление не выбрано», либо признаётся закрытым как
+нереализованное. Третьего нельзя: пока он висит в трекере, десять задач выглядят
+как план, а план, противоречащий принятому решению, вреднее отсутствия плана.
+
+---
+
+## Неподтверждённое направление: GEOMETRY CORE RESEARCH
+
+*P0/A1 decision: hybrid architecture (existing Rust kernel + libigl + custom Mask Domain Core). CGAL RED FLAG (commercial license required). libigl MPL-2.0 usable. Cutter algorithms reusable (same i_overlay backend). conformal-stencil-generator too experimental. OpenCADKernel early stage MPL-2.0.*
+
+> **Не является частью плана.** Блок сохранён дословно, чтобы решение не потерялось
+> вместе с правкой. Он не прошёл сверку с кодом, не встроен в волны и местами
+> противоречит принятому решению **A1** — см. **DOC-008**. Ни одна задача отсюда
+> не может считаться начатой.
+
+These tasks follow the architecture decision research and must be worked in stage order. Each stage depends on the previous one being complete.
+
+*P0/A1 decision: hybrid architecture (existing Rust kernel + libigl + custom Mask Domain Core). CGAL RED FLAG (commercial license required). libigl MPL-2.0 usable. Cutter algorithms reusable (same i_overlay backend). Conformal-stencil-generator too experimental. OpenCADKernel early stage MPL-2.0.*
+
+These tasks follow the architecture decision research and must be worked in stage order. Each stage depends on the previous one being complete.
+
+### GEOM-010 · License audit и compliance documentation · P0 · HIGH
+
+**Dependencies**: None
+
+**Description**: 
+Confirm all third-party license terms and document compliance requirements for commercial closed-source product.
+- Verify libigl MPL-2.0 allows commercial closed source (with source object file obligation)
+- Document CGAL cannot be used without commercial license (GeometryFactory contact)
+- Verify i_overlay license compatibility
+- Create License Compliance document with all dependencies and terms
+
+**Acceptance criteria**:
+- License audit table completed for all crates
+- CGAL explicitly marked as NOT USED with reasoning
+- libigl compliance mechanism documented (source offer protocol)
+- Documentation reviewed and signed off
+
+**Definition of Done**:
+- `License_Compliance.md` created in docs/
+- All `Cargo.lock` dependencies audited
+- Legal sign-off obtained or path to obtainment documented
+
+---
+
+### GEOM-020 · Fix kernel: add missing API functions · P1 · MEDIUM
+
+**Dependencies**: None (existing kernel code)
+
+**Description**:
+Document and stabilize the existing Rust geometry kernel API. Add missing utility functions identified during research.
+- Add `shape_centroid` — mass centroid calculation for nesting
+- Add `shape_moment_of_inertia` — stability analysis for layer decomposition
+- Add `contour_centroid` — UV seam placement helper
+- Add `shape_outer_bbox` — bounding box extraction
+- Generate Rustdocs for all pub modules
+- Add 20+ boundary/edge case tests
+
+**Acceptance criteria**:
+- All new functions documented with examples
+- 90%+ test coverage on kernel crate
+- `cargo doc --no-deps --launch` succeeds without warnings
+- New functions tested with boundary conditions (NaN, Inf, max coords, empty shapes)
+
+**Definition of Done**:
+- Kernel API documented and stable
+- Test suite passing with new coverage
+- No API-breaking changes planned without ADR
+
+---
+
+### GEOM-030 · Integrate libigl LSCM FFI · P1 · HIGH
+
+**Dependencies**: GEOM-010 (license compliance confirmed)
+
+**Description**:
+Build Rust↔C++ FFI bridge for libigl surface parameterization. Enable 3D→2D UV mapping pipeline.
+- Create C API wrappers for `igl::lscm()` and `igl::harmonic_parameterization()`
+- Design memory-safe FFI boundary: caller-owned buffers, explicit size params
+- Implement `IgFeature` enum: `LSCM`, `HARMONIC`, `ARAP`
+- Implement `IgParams` struct: boundary indices, boundary coords, max iterations
+- Implement `IgResult` struct: UV coords, convergence info, error code
+- Test with helmet mesh (~100k tris), motorcycle tank (~200k tris), car hood (~500k tris)
+
+**Acceptance criteria**:
+- FFI bridge compiles on linux/macOS/Windows
+- LSCM produces UV coords for test meshes
+- Distortion metrics reported (max angle distortion, area distortion)
+- Seam selection UI works (2+ points per connected component)
+- Performance: < 5s for 200k triangle mesh
+
+**Definition of Done**:
+- FFI bridge in `engine/ffi/` directory
+- `cargo test --lib` passes for FFI tests
+- Demo script: `mesh_to_uv.sh` working
+- Performance profile recorded
+
+---
+
+### GEOM-040 · Adapt Cutter bridging/kerf algorithms · P2 · MEDIUM
+
+**Dependencies**: GEOM-020 (kernel stable)
+
+**Description**:
+Extract and adapt stencil generation algorithms from cutter library. Bridging, kerf compensation, min-feature despeckle — all use same i_overlay backend as kernel.
+- Extract bridging logic: `bridge_unanchored` adaptation to kernel Shapes API
+- Extract kerf compensation: offset_shape with kerf_mm parameter
+- Extract min-feature despeckle: island merge algorithm from cutter stencil.rs
+- Maintain physical constraints: min_material, kerf, bridge_length
+- Port test suite from cutter to kernel test format
+
+**Acceptance criteria**:
+- Bridging produces same results as cutter on test patterns (within 0.01mm)
+- Kerf compensation correctly shrinks geometry by blade width
+- Despeckle removes islands below min_feature_size threshold
+- All adapted functions pass kernel test suite
+
+**Definition of Done**:
+- Adapted algorithms in `engine/kernel/src/adapted/` directory
+- Test suite passing (`cargo test --lib`)
+- Comparison test: kernel vs cutter output on 5 test patterns
+
+---
+
+### GEOM-050 · Layer decomposition with bridges/islands · P2 · HIGH
+
+**Dependencies**: GEOM-030 (libigl FFI), GEOM-040 (adapted algorithms)
+
+**Description**:
+Implement mask domain logic: decompose 2D pattern into physical paint layers with bridges, islands, peel direction.
+- Island detection: integrate `measure::unanchored_islands` into UI
+- Bridge placement: integrate `bridge::bridge_unanchored` with manufacturing profile
+- Peel direction analysis: algorithm for paint order determination
+- Layer decomposition: main algorithm — pattern → ordered layers with bridges
+- UI components: layer editor, bridge editor, registration marks
+
+**Acceptance criteria**:
+- Input: 2D pattern in UV space
+- Output: Ordered layers with bridges, islands handled, registration marks
+- Each layer passes min_width, min_gap, bridge validation
+- Paint order logical (based on area, complexity, peel direction)
+- UI can edit bridges (add/remove/relocate)
+
+**Definition of Done**:
+- Layer decomposition algorithm implemented and tested
+- UI components for layer/bridge editing
+- Test scenarios: helmet, motorcycle tank, car hood patterns
+- Export to mask project format with layer data
+
+---
+
+### GEOM-060 · Manufacturing profiles system · P2 · MEDIUM
+
+**Dependencies**: GEOM-050 (layer decomposition working)
+
+**Description**:
+Build profile-driven geometry validation. Material constraints, cutter characteristics, paint properties drive geometry decisions.
+- MaterialProfile: min_width_mm, min_gap_mm, min_island_mm2, min_bridge_mm, kerf_mm
+- CutterProfile: offset_curve, fillet_radius, miter_limit, tolerance_mm
+- PaintProfile: opacity, layer_order (auto/commanual), bleed_compensation, dry_time
+- Profile management UI: load/save JSON, profile library (standard profiles)
+- Profile validation: geometry → verdict + violations mapping
+
+**Acceptance criteria**:
+- Profiles load from JSON files
+- Geometry validation returns verdict + specific violations
+- Profile-driven tolerance for LSCM curve approximation
+- UI can create/edit/delete profiles
+- Standard profiles: vinyl-090, knife-25mm, matte-vinyl-090
+
+**Definition of Done**:
+- Profile data models implemented
+- Profile management UI
+- Validation pipeline: geometry + profile → verdict
+- Test profiles with known pass/fail cases
+
+---
+
+### GEOM-070 · Go C ABI integration · P2 · MEDIUM
+
+**Dependencies**: GEOM-030 (libigl FFI), platform toolchain
+
+**Description**:
+Enable geometry calls from Go backend. Two approaches: CGO or separate service.
+- C ABI bindings: compile libigl + kernel as shared library
+- CGO test: Go file calling Rust geometry functions
+- Alternative: gRPC service protocol (if distributed needed)
+- WASM fallback: compile to wasm32-unknown-unknown for browser
+- CLI tool: `mask-engine geo` commands for Go integration testing
+
+**Acceptance criteria**:
+- Go can call kernel geometry functions via C ABI
+- OR gRPC service running with geometry operations
+- WASM module compiles and runs in browser
+- CLI tool working for all geometry operations
+
+**Definition of Done**:
+- C ABI working (or gRPC service)
+- Go test program calling geometry functions
+- WASM build and browser test
+- CLI `mask-engine geo --help` showing all options
+
+---
+
+### GEOM-080 · MVP Geometry Core · P1 · HIGH
+
+**Dependencies**: GEOM-020 through GEOM-070 (all previous stages)
+
+**Description**:
+Assemble all components into working MVP. Full pipeline: 3D mesh → LSCM UV → pattern → layered SVG with bridges/islands. Validation: min_width, min_gap, bridges present.
+- Combine kernel + libigl FFI + layer decomposition + bridging
+- SVG export pipeline: 3D mesh → UV → pattern → layered SVG
+- Validation pipeline: geometry + profile → verdict + messages
+- Test scenarios: helmet, motorcycle tank, car hood
+- CLI: `mask-engine full-pipeline --mesh car.obj --pattern design.svg --profile vinyl-v4.json --output manifest.json`
+
+**Acceptance criteria**:
+- Full pipeline working end-to-end
+- All three test scenarios pass validation
+- CLI commands working as described
+- SVG output physically manufacturable (all constraints satisfied)
+
+**Definition of Done**:
+- MVP `cargo run --release` completes without errors
+- All test scenarios: PASS verdict with specific measurements
+- CLI help and commands documented
+- MVP demo video or screenshot
+
+---
+
+### GEOM-090 · Production hardening · P2 · MEDIUM
+
+**Dependencies**: GEOM-080 (MVP working)
+
+**Description**:
+Performance optimization, robustness improvements, test suite, security review.
+- Profile LSCM computation for 1M+ triangles
+- Memory optimization: streaming vs full mesh
+- Multithreading for parallel computation
+- Property-based tests (QuickCheck/rust-prophets)
+- Golden tests: compare output with reference data
+- CI integration: `make check`, cargo test, linting
+- FFI boundary validation: no invalid values cross C++ boundary
+- Memory leak checks
+
+**Acceptance criteria**:
+- Performance: < 30s для full car body (1M triangles)
+- Reliability: 99.9% success rate на test suite
+- License compliance: documented and verified
+- Full test suite passing
+- No security vulnerabilities in FFI boundary
+
+**Definition of Done**:
+- Performance profile recorded for all key operations
+- Property-based test suite passing
+- CI pipeline green on every push
+- Security review completed
+
+---
+
+### GEOM-100 · Studio integration · P2 · MEDIUM
+
+**Dependencies**: GEOM-080 (MVP working)
+
+**Description**:
+Frontend components, API endpoints, WASM module.
+- Next.js: drag&drop 3D model viewer (Three.js/react-three-fiber)
+- UV editor: move/add seams
+- Layer editor: toggles, bridge editor
+- Preview: 3D visualization of applied pattern
+- API: POST /api/geo/parameterize, POST /api/geo/decompose, POST /api/geo/validate
+- WASM module: browser-based computation без backend
+
+**Acceptance criteria**:
+- 3D model viewer with drag&drop
+- UV editor with seam selection
+- Layer editor with bridge control
+- API endpoints working (tested with curl)
+- WASM module in browser demo
+
+**Definition of Done**:
+- Studio frontend with geometry operations
+- API endpoints tested and documented
+- WASM demo in browser
+- User flow: upload mesh → get layered SVG
+
+---
