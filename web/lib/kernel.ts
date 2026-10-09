@@ -227,10 +227,24 @@ let loading: Promise<Kernel> | null = null;
 const DEFAULT_URL = "/pkg/mask_wasm.js";
 
 async function defaultLoader(): Promise<unknown> {
-  const mod = (await import(/* @vite-ignore */ DEFAULT_URL)) as Record<
-    string,
-    unknown
-  >;
+  // The bundler is told to keep its hands off, which is what `next.config.mjs`
+  // says about this artifact: it is served as a static file and must not be
+  // bundled or rewritten. The path stays a variable so `tsc` does not try to
+  // resolve it as a source module, which it cannot and which has nothing to do
+  // with the kernel.
+  //
+  // What was wrong before is that webpack was *not* told to keep its hands off.
+  // It cannot resolve an expression, so it emitted `Critical dependency: the
+  // request of a dependency is an expression` — a warning shaped like noise —
+  // and at runtime fell back to a CommonJS `require` relative to this module,
+  // which failed as `Cannot find module '/pkg/mask_wasm.js'`. The editor could not
+  // start at all.
+  //
+  // The warning was the prediction of the failure, and it sat in the build log
+  // the whole time.
+  const mod = (await import(
+    /* webpackIgnore: true */ DEFAULT_URL
+  )) as Record<string, unknown>;
   const init = mod.default;
   if (typeof init === "function") {
     await (init as () => Promise<void>)();
