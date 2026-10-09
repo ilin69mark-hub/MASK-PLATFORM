@@ -578,6 +578,7 @@ fn build_layer(
 
     let width = widen_to.unwrap_or(layer.width_mm);
     let mut merged: Shapes = Shapes::new();
+    let mut first = true;
 
     for line in &layer.centrelines {
         if line.len() < 2 {
@@ -589,8 +590,23 @@ fn build_layer(
         let points: Vec<Point> = line.iter().map(|[x, y]| Point { x: *x, y: *y }).collect();
         let band = widen(&points, width)
             .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
-        merged = union(&merged, &band)
-            .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?;
+        // Fold from the first band rather than from an empty `Shapes`.
+        //
+        // `union(empty, band)` is not a no-op: on some centrelines it returns two
+        // or three shapes where `widen` alone returns one, and the extra ones
+        // have zero area. Whether it happens depends on the width in a way that
+        // is not monotonic — a 34-point ribbon passed at 2.5 mm and failed at
+        // 2.2, 2.4, 4.1, 4.3 and 4.4 — so a fixture could be valid at one width
+        // and refused a tenth of a millimetre away for geometry that never
+        // changed. The studio already folds from the first band, which is why the
+        // same fixture measures differently there. See BUG-023.
+        merged = if first {
+            first = false;
+            band
+        } else {
+            union(&merged, &band)
+                .map_err(|e| format!("layer {} «{}»: {e}", layer.index, layer.name))?
+        };
     }
 
     // The caller bridges the finished layer, so bridging after the union is

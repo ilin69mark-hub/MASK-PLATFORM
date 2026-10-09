@@ -20,9 +20,32 @@ import { StudioFromFixture, type FixtureLayerData } from "@/components/StudioFro
 // with a bare ENOENT, which is a poor way to learn a path is off.
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../../..");
 
-const FIXTURE = resolve(ROOT, "engine/fixtures/proof_panel.json");
 const MATERIAL = resolve(ROOT, "engine/profiles/data/matte-vinyl-090.v4.json");
 const PLOTTER = resolve(ROOT, "engine/profiles/data/knife-25mm.v2.json");
+
+/**
+ * Fixtures the studio is allowed to open, in the order they are offered.
+ *
+ * An allowlist, not a directory listing, and the name is matched against this
+ * list before it is joined to a path. A `?fixture=` parameter turned into a path
+ * unchecked is how `../../.ssh/id_rsa` gets read by a web page; here the worst a
+ * request can do is pick a different drawing.
+ *
+ * `proof_panel` stays first because it is what the tests and the screenshots
+ * assume. `burst` is the multi-colour template.
+ */
+const FIXTURES: { id: string; label: string }[] = [
+  { id: "proof_panel", label: "Панель (эталон)" },
+  { id: "burst", label: "Взрыв (шаблон)" },
+];
+const DEFAULT_FIXTURE = "proof_panel";
+
+function fixturePath(id: string): string {
+  const known = FIXTURES.some((f) => f.id === id);
+  // Anything unrecognised falls back rather than being rejected, so a stale
+  // link still opens the app instead of showing an error page.
+  return resolve(ROOT, `engine/fixtures/${known ? id : DEFAULT_FIXTURE}.json`);
+}
 
 interface Fixture {
   project_id: string;
@@ -35,7 +58,13 @@ interface Fixture {
   }[];
 }
 
-export default async function StudioPage() {
+export default async function StudioPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ fixture?: string }>;
+}) {
+  const asked = (await searchParams).fixture ?? DEFAULT_FIXTURE;
+  const FIXTURE = fixturePath(asked);
   const [fixtureText, materialJson, plotterJson] = await Promise.all([
     readFile(FIXTURE, "utf8"),
     readFile(MATERIAL, "utf8"),
@@ -59,6 +88,33 @@ export default async function StudioPage() {
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif" }}>
+      <nav
+        aria-label="Шаблон"
+        style={{ display: "flex", gap: 6, padding: "8px 12px", flexWrap: "wrap" }}
+      >
+        {FIXTURES.map((f) => {
+          const active = f.id === (asked in Object.fromEntries(FIXTURES.map((x) => [x.id, 1])) ? asked : DEFAULT_FIXTURE);
+          return (
+            <a
+              key={f.id}
+              href={`/studio?fixture=${f.id}`}
+              aria-pressed={active}
+              style={{
+                font: "inherit",
+                fontSize: 13,
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: `1px solid ${active ? "#111" : "#bbb"}`,
+                background: active ? "#111" : "#fff",
+                color: active ? "#fff" : "#111",
+                textDecoration: "none",
+              }}
+            >
+              {f.label}
+            </a>
+          );
+        })}
+      </nav>
       <StudioFromFixture
         projectId={fixture.project_id}
         revision={fixture.revision}
