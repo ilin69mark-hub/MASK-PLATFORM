@@ -106,6 +106,14 @@ fixtures: ## Report every fixture against the verdict it declares
 licenses: ## Verify every dependency has its license text collected
 	@python3 $(ROOT)/tools/license_check.py
 
+.PHONY: svg-roundtrip
+svg-roundtrip: ## Read every produced SVG back and check it against the DXF reader
+	@mkdir -p $(OUT)/physical
+	@cd $(ENGINE) && $(CARGO) build -q --release -p mask-export
+	@$(MAKE) --no-print-directory physical
+	@cd $(ENGINE) && $(CARGO) run -q --release -p mask-export \
+		--example svg_roundtrip -- $(OUT)/physical
+
 .PHONY: physical
 physical: ## Print-ready files for every physical proof case, including the failing ones
 	@mkdir -p $(OUT)/physical

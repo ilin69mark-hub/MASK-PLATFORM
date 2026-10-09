@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[example]]
+name = "svg_roundtrip"
+
 [dependencies]
 mask-kernel.workspace = true
 mask-validate.workspace = true

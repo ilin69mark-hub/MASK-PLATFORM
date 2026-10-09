@@ -12,6 +12,7 @@ pub mod dxf;
 pub mod instruction;
 pub mod manifest;
 pub mod plt;
+pub mod svg_read;
 
 use mask_kernel::{Shape, Shapes, CANON_COORD_DP};
 use mask_nesting::RegistrationMarks;
