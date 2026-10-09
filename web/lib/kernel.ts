@@ -102,11 +102,27 @@ export interface EngineConstants {
   engine_version: string;
 }
 
+/**
+ * The effective limits, exactly as `rules::EffectiveLimits` publishes them.
+ *
+ * Eight of these were missing here while the kernel returned them all. That is
+ * harmless at runtime — TypeScript only complains about a field it wants and
+ * finds absent — and it is why the gap went unnoticed: nothing fails, the facade
+ * just quietly denies the editor numbers the engine has. `kernel-contract-check`
+ * now asserts every field is present, so the two cannot drift again.
+ */
 export interface EffectiveLimits {
   line_width_mm: number;
   gap_mm: number;
   island_width_mm: number;
+  island_area_mm2: number;
+  feature_length_mm: number;
+  /** Longest cuttable tab, from `material.minimums.bridge_length_mm` (T-07). */
+  bridge_length_mm: number;
   corner_radius_mm: number;
+  /** Chord tolerance for flattening curves, carried to the blade doing the cut. */
+  curve_tolerance_mm: number;
+  min_angle_deg: number;
   bridge_width_mm: number;
   max_features_per_100cm2: number;
   max_area_mm2: number;
@@ -114,6 +130,15 @@ export interface EffectiveLimits {
   max_tile_length_mm: number;
   kerf_mm: number;
   registration_error_mm: number;
+  /** What the material tolerates, from `physical.tolerance_registration_mm`. */
+  registration_budget_mm: number;
+  peel_angle_min_deg: number;
+  /**
+   * Free text, deliberately: a new material may declare a peel rate this build
+   * has never heard of, and rejecting the profile would be worse than carrying
+   * the string through.
+   */
+  peel_rate: string;
 }
 
 /** The subset of the WASM module this UI depends on. */

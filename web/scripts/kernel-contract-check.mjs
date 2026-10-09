@@ -55,19 +55,37 @@ const FACADE_CONSTANTS = [
   "engine_version",
 ];
 
-const FACADE_LIMITS = [
-  "line_width_mm",
-  "gap_mm",
-  "island_width_mm",
-  "corner_radius_mm",
-  "bridge_width_mm",
-  "max_features_per_100cm2",
-  "max_area_mm2",
-  "max_tile_width_mm",
-  "max_tile_length_mm",
-  "kerf_mm",
-  "registration_error_mm",
-];
+/**
+ * The facade's shape for `effective_limits`, transcribed from web/lib/kernel.ts.
+ *
+ * Every field of `rules::EffectiveLimits`, with the type each one arrives as.
+ * Eight were missing here while the kernel returned them all; nothing failed,
+ * because TypeScript only objects to a field it wants and cannot find. The list
+ * was an array of names checked for `typeof === "number"`, which is true of all
+ * but one — `peel_rate` is free text by design, so the names have to carry their
+ * expected type.
+ */
+const FACADE_LIMITS = {
+  line_width_mm: "number",
+  gap_mm: "number",
+  island_width_mm: "number",
+  island_area_mm2: "number",
+  feature_length_mm: "number",
+  bridge_length_mm: "number",
+  corner_radius_mm: "number",
+  curve_tolerance_mm: "number",
+  min_angle_deg: "number",
+  bridge_width_mm: "number",
+  max_features_per_100cm2: "number",
+  max_area_mm2: "number",
+  max_tile_width_mm: "number",
+  max_tile_length_mm: "number",
+  kerf_mm: "number",
+  registration_error_mm: "number",
+  registration_budget_mm: "number",
+  peel_angle_min_deg: "number",
+  peel_rate: "string",
+};
 
 const FACADE_VALIDATION = [
   "verdict",
@@ -95,6 +113,16 @@ function typeOf(value) {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
   return typeof value;
+}
+
+/**
+ * Whether a value has one of the types a `…|undefined` expectation lists.
+ *
+ * `undefined` is always allowed: it is how an absent Rust `Option` arrives, and
+ * a field that is legitimately optional must be allowed to be missing.
+ */
+function matchesType(value, expected) {
+  return expected.split("|").includes(typeOf(value));
 }
 
 async function main() {
@@ -140,10 +168,10 @@ async function main() {
 
   // ── limits shape ─────────────────────────────────────────────────────
   const limits = wasm.effective_limits(material, plotter);
-  for (const key of FACADE_LIMITS) {
+  for (const [key, expected] of Object.entries(FACADE_LIMITS)) {
     check(
       `effective_limits.${key} present`,
-      key in limits && typeof limits[key] === "number",
+      key in limits && matchesType(limits[key], expected),
       typeof limits[key]
     );
   }
