@@ -8,9 +8,11 @@
 //! version must produce byte-identical output. No clock, no locale, no hash-map
 //! iteration order, fixed decimal precision.
 
+pub mod archive;
 pub mod dxf;
 pub mod instruction;
 pub mod manifest;
+pub mod pdf;
 pub mod plt;
 pub mod svg_read;
 

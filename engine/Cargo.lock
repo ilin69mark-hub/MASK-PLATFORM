@@ -218,6 +218,8 @@ dependencies = [
 name = "mask-export"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "mask-kernel",
  "mask-nesting",
  "mask-profiles",

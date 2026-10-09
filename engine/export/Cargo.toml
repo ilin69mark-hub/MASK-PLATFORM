@@ -10,7 +10,15 @@ publish.workspace = true
 [[example]]
 name = "svg_roundtrip"
 
+[[example]]
+name = "zipdump"
+
+[[example]]
+name = "pdfdump"
+
 [dependencies]
+crc32fast.workspace = true
+flate2.workspace = true
 mask-kernel.workspace = true
 mask-validate.workspace = true
 mask-nesting.workspace = true

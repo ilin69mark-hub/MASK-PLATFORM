@@ -986,6 +986,132 @@ fn run(args: &Args) -> Result<bool, String> {
         instruction.uses.len()
     );
 
+    // The printable sheet: one page per layer at 1:1, because a sheet is printed
+    // at 100% and scaling changes the element width. A layer that will not fit
+    // is left out and named, rather than quietly shrunk onto the page.
+    let sheet_meta = mask_export::pdf::SheetMeta {
+        project_id: &fixture.project_id,
+        revision: fixture.revision,
+        engine_version: env!("CARGO_PKG_VERSION"),
+        verdict: report.verdict,
+        limits_physically_verified: report.limits_physically_verified,
+        ..mask_export::pdf::SheetMeta::default()
+    };
+
+    // Contours are collected up front so the page views can borrow them; making
+    // them inside the view would drop them at the end of the statement.
+    let contours_by_layer: Vec<Vec<mask_kernel::Contour>> = layers
+        .iter()
+        .map(|l| {
+            l.geometry
+                .shapes
+                .iter()
+                .flat_map(|s| std::iter::once(s.outer.clone()).chain(s.holes.iter().cloned()))
+                .collect()
+        })
+        .collect();
+    let empty: Vec<mask_kernel::Contour> = Vec::new();
+
+    let mut sheet_layers: Vec<mask_export::pdf::SheetLayer<'_>> = Vec::new();
+    for (layer, contours) in layers.iter().zip(contours_by_layer.iter()) {
+        let page = mask_export::pdf::SheetLayer {
+            index: layer.index,
+            name: &layer.name,
+            paths: contours,
+            fills: &empty,
+        };
+        if mask_export::pdf::fit(&page, &sheet_meta).fits {
+            sheet_layers.push(page);
+        } else {
+            println!(
+                "  слой {} не помещается на лист без уменьшения — в PDF не включён",
+                layer.index
+            );
+        }
+    }
+
+    let sheet = mask_export::pdf::mask_sheet(&sheet_layers, &sheet_meta);
+    let sheet_file = format!(
+        "{}_rev{}_mask_sheet.pdf",
+        fixture.project_id, fixture.revision
+    );
+    let sheet_path = args.out_dir.join(&sheet_file);
+    fs::write(&sheet_path, &sheet)
+        .map_err(|e| format!("cannot write {}: {e}", sheet_path.display()))?;
+    println!(
+        "  wrote {} ({} bytes, {} page(s))",
+        sheet_path.display(),
+        sheet.len(),
+        sheet_layers.len()
+    );
+
+    // The archive: everything above in one file, so a kit is one download. Built
+    // from what is on disk, so it cannot disagree with the directory — but only
+    // this project's files: `make physical` puts every fixture in one directory,
+    // and an earlier version packed all 65 of them into each project's kit.
+    let archive_name = format!("{}_rev{}_kit.zip", fixture.project_id, fixture.revision);
+    let project_prefix = format!("{}_rev{}_", fixture.project_id, fixture.revision);
+    let mut archive_entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in fs::read_dir(&args.out_dir).map_err(|e| format!("{e}"))? {
+        let path = entry.map_err(|e| format!("{e}"))?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == archive_name {
+            continue; // never fold the archive into itself
+        }
+        if !name.starts_with(&project_prefix) {
+            continue; // another project's file sharing the directory
+        }
+        let data = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        archive_entries.push((name.to_string(), data));
+    }
+    archive_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let borrow: Vec<mask_export::archive::Entry<'_>> = archive_entries
+        .iter()
+        .map(|(name, data)| mask_export::archive::Entry { name, data })
+        .collect();
+    let zip = mask_export::archive::zip(&borrow, mask_export::archive::DOS_EPOCH);
+    let archive_path = args.out_dir.join(&archive_name);
+    fs::write(&archive_path, &zip)
+        .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
+    println!(
+        "  wrote {} ({} bytes, {} file(s))",
+        archive_path.display(),
+        zip.len(),
+        archive_entries.len()
+    );
+
+    // The archive must agree with the manifest: every artifact the manifest lists
+    // is inside, and every file inside is one the manifest accounts for. A kit
+    // whose manifest does not describe it is not a reproducible kit.
+    let in_archive: Vec<&str> = archive_entries.iter().map(|(n, _)| n.as_str()).collect();
+    let listed: Vec<&str> = artifacts
+        .iter()
+        .map(|a| a.file.as_str())
+        .chain([
+            manifest_file.as_str(),
+            instruction_file.as_str(),
+            sheet_file.as_str(),
+        ])
+        .collect();
+
+    let mut missing: Vec<&str> = listed
+        .iter()
+        .filter(|f| !in_archive.contains(f))
+        .copied()
+        .collect();
+    missing.sort_unstable();
+    if !missing.is_empty() {
+        return Err(format!(
+            "в архиве нет файлов из манифеста: {}",
+            missing.join(", ")
+        ));
+    }
+
     println!(
         "  {} file(s), {} bytes total{}",
         written,

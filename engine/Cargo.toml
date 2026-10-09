@@ -21,6 +21,10 @@ publish = false
 [workspace.dependencies]
 # i_overlay 9.0.0 requires rust >= 1.88 (ADR-0003).
 i_overlay = "9.0.0"
+# Already in the tree through `png`; promoted to a direct dependency so the
+# archive writer can deflate without pulling in a zip container crate.
+crc32fast = "1"
+flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

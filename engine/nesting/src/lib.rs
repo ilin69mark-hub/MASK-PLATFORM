@@ -6,10 +6,14 @@
 //! module produces that plan; the registration marks are what make the
 //! reassembly possible.
 //!
-//! Scope: `fixed_grid` and `strip`. Rectangle packing with contour-following
-//! (`offset_nesting`) is deliberately absent — it buys maybe 14% of material for
-//! a large increase in failure modes, which is a bad trade while the physical
-//! process is still unproven.
+//! Scope: `fixed_grid` only. Two strategies that appear in the roadmap are not
+//! here: `strip` is named in `ROADMAP.md` 4.8 but has no function behind it, and
+//! rectangle packing with contour-following (`offset_nesting`) is deliberately
+//! absent — it buys maybe 14% of material for a large increase in failure modes,
+//! which is a bad trade while the physical process is still unproven.
+//!
+//! A previous version of this comment claimed `strip` was in scope. It was not,
+//! and the comment was the only place in the tree that said so.
 
 use mask_kernel::{Contour, Point, Shape, Shapes};
 use serde::{Deserialize, Serialize};
