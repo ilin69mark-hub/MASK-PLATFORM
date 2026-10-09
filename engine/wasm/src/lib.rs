@@ -1870,6 +1870,188 @@ mod consistency_tests {
         );
     }
 
+    /// The spread of geometries the two runtimes are compared on.
+    ///
+    /// Chosen to cover the shapes that take different paths through the measurement:
+    /// a band, a figure away from the origin, a band too thin to cut, a concave
+    /// outline, a triangle, a frame with a free island at three different gaps, a
+    /// contour with an arc, two regions nearly touching, and a hole inside a hole.
+    /// One agreement test on one artifact is what BUG-019 had, and it is how the
+    /// project has twice been wrong about its own coverage.
+    fn disagreement_cases() -> Vec<(&'static str, String)> {
+        let frame = |gap: f64, neck: f64| {
+            let outer = 200.0;
+            serde_json::json!({
+            "shapes": [
+                {
+                    "outer": {
+                        "points": [[0.0,0.0],[outer,0.0],[outer,outer],[0.0,outer]],
+                        "closed": true
+                    },
+                    "holes": [{
+                        "points": [[gap,gap],[gap,outer-gap],[outer-gap,outer-gap],[outer-gap,gap]],
+                        "closed": true
+                    }]
+                },
+                {
+                    "outer": {
+                        "points": [
+                            [2.0*gap,2.0*gap],
+                            [2.0*gap+4.0+neck,2.0*gap],
+                            [2.0*gap+4.0+neck,2.0*gap+4.0],
+                            [2.0*gap,2.0*gap+4.0]
+                        ],
+                        "closed": true
+                    },
+                    "holes": []
+                }
+            ]
+        })
+        .to_string()
+        };
+
+        vec![
+        ("band 10x5", square(10.0, 5.0)),
+        (
+            "band away from the origin",
+            serde_json::json!({
+                "shapes": [{
+                    "outer": {
+                        "points": [[812.0,640.0],[908.0,640.0],[908.0,712.0],[812.0,712.0]],
+                        "closed": true
+                    },
+                    "holes": []
+                }]
+            })
+            .to_string(),
+        ),
+        ("band too thin to cut", square(10.0, 0.2)),
+        (
+            "concave outline",
+            serde_json::json!({
+                "shapes": [{
+                    "outer": {
+                        "points": [[0.0,0.0],[20.0,0.0],[20.0,2.0],[2.0,2.0],[2.0,20.0],[0.0,20.0]],
+                        "closed": true
+                    },
+                    "holes": []
+                }]
+            })
+            .to_string(),
+        ),
+        (
+            "triangle",
+            serde_json::json!({
+                "shapes": [{
+                    "outer": { "points": [[0.0,0.0],[8.0,0.0],[0.0,8.0]], "closed": true },
+                    "holes": []
+                }]
+            })
+            .to_string(),
+        ),
+        ("frame and island, 3 mm gap", frame(3.0, 0.2)),
+        ("frame and island, 0.5 mm gap", frame(0.5, 0.2)),
+        ("frame and island, 2 mm tab", frame(3.0, 2.0)),
+        (
+            "contour with an arc",
+            serde_json::json!({
+                "shapes": [{
+                    "outer": { "points": [[0.0,0.0],[10.0,0.0],[10.0,10.0]], "closed": true },
+                    "arcs": [{
+                        "from_vertex": 2,
+                        "to_vertex": 0,
+                        "via": [5.0, 15.0],
+                        "sweep": 1
+                    }],
+                    "holes": []
+                }]
+            })
+            .to_string(),
+        ),
+        (
+            "two regions nearly touching",
+            serde_json::json!({
+                "shapes": [
+                    { "outer": { "points": [[0.0,0.0],[5.0,0.0],[5.0,5.0],[0.0,5.0]], "closed": true },
+                      "holes": [] },
+                    { "outer": { "points": [[5.4,0.0],[10.4,0.0],[10.4,5.0],[5.4,5.0]], "closed": true },
+                      "holes": [] }
+                ]
+            })
+            .to_string(),
+        ),
+        (
+            "a hole inside a hole",
+            serde_json::json!({
+                "shapes": [{
+                    "outer": { "points": [[0.0,0.0],[40.0,0.0],[40.0,40.0],[0.0,40.0]], "closed": true },
+                    "holes": [
+                        { "points": [[5.0,5.0],[5.0,35.0],[35.0,35.0],[35.0,5.0]], "closed": true },
+                        { "points": [[10.0,10.0],[10.0,30.0],[30.0,30.0],[30.0,10.0]], "closed": true }
+                    ]
+                }]
+            })
+            .to_string(),
+        ),
+    ]
+    }
+
+    #[test]
+    fn the_two_runtimes_agree_on_more_than_one_artifact() {
+        // BUG-019 was closed against a single geometry — a 0.2 mm whisker — and the
+        // closure was correct. But a bug closed against its own artifact may still be
+        // open elsewhere, which is how this project has twice overstated its coverage.
+        // So the browser's `min_width_mm` is compared with the validator's across the
+        // spread above, not against one remembered number.
+        let mut disagreeing: Vec<&str> = Vec::new();
+        let mut compared_numbers = 0;
+        let mut both_silent = Vec::new();
+
+        for (name, geometry) in disagreement_cases() {
+            let browser = measure_layer_inner(&geometry)
+                .expect("measure")
+                .min_width_mm;
+            let validator: Shapes = serde_json::from_str(&geometry).expect("parse");
+            let material: MaterialProfile = serde_json::from_str(MATERIAL).expect("material");
+            let plotter: PlotterProfile = serde_json::from_str(PLOTTER).expect("plotter");
+            let cutting = CuttingProfile::derive(&material, &plotter);
+            let rules = RuleSet::from_profile(&cutting);
+            let report = mask_validate::validate(
+                &[LayerInput {
+                    index: 1,
+                    name: "agreement".into(),
+                    geometry: validator,
+                    bridges: Vec::new(),
+                    application_order: None,
+                }],
+                &cutting,
+                &rules,
+                false,
+            );
+            let theirs = report.layers[0].min_width_mm;
+
+            match (browser, theirs) {
+                (Some(b), Some(t)) if (b - t).abs() < 1e-6 => compared_numbers += 1,
+                // Both reporting nothing is agreement — neither runtime claims a width,
+                // and inventing one would be the disagreement. It is counted separately
+                // from the numbers above, because a spread where every case is silent
+                // would otherwise pass while comparing nothing at all.
+                (None, None) => both_silent.push(name),
+                _ => disagreeing.push(name),
+            }
+        }
+
+        assert!(
+            compared_numbers >= 9,
+            "only {compared_numbers} cases compared a number on both sides; \
+         the rest were silent: {both_silent:?}"
+        );
+        assert!(
+            disagreeing.is_empty(),
+            "the browser and the validator disagree on: {disagreeing:?}"
+        );
+    }
+
     #[test]
     fn the_bounding_box_starts_where_the_geometry_starts() {
         // BUG-018. A viewport is built from the first two numbers, so a region
