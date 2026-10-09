@@ -7,6 +7,7 @@ import {
   mmToPx,
   pxRadiusToMm,
   pxToMm,
+  viewFor,
   type DrawnSizePx,
   type ViewBoxMm,
 } from "../lib/editor/viewTransform.ts";
@@ -310,4 +311,43 @@ test("a contour that closes by repeating its first point lists that point once",
     [0, 1, 2],
     "and the indices the kernel would use are unchanged"
   );
+});
+
+// ── the view must not move while a measurement is on its way ──────────────
+//
+// A committed edit changes the geometry, the re-measurement is debounced, and
+// during that gap the measurement is not `ready`. The view used to fall back to
+// a placeholder then, which is a 100 mm box — so the dots jumped and every
+// pointer position was converted through the wrong rectangle, in the middle of
+// the drag that caused it. The symptom was a tool that takes the first edit and
+// then stops.
+
+test("the view keeps the last measured box when nothing new has arrived", () => {
+  const measured: [number, number, number, number] = [9.6, 9.6, 240.8, 160.8];
+  const withResult = viewFor(measured);
+  // The same call during a pending measurement: no new box, so the view must be
+  // identical, not a placeholder.
+  assert.deepEqual(viewFor(null), { minX: -4, minY: -4, w: 108, h: 108 });
+  assert.notDeepEqual(withResult, viewFor(null), "the fallback must be distinguishable");
+  assert.deepEqual(withResult, viewFor(measured), "a known box is stable");
+  // And the retention the component performs: last known wins over nothing.
+  const retained = measured ?? null;
+  assert.deepEqual(viewFor(retained), withResult);
+});
+
+test("the view carries the origin, so dots and pointers agree", () => {
+  // The round trip the Node tool depends on, on a figure away from the origin —
+  // where a view built around zero puts every vertex off-screen and every hit
+  // test somewhere else entirely.
+  const bbox: [number, number, number, number] = [812, 640, 96, 72];
+  const view = viewFor(bbox);
+  assert.equal(view.minX, 812 - Math.max(96, 72) * 0.04);
+  assert.equal(view.minY, 640 - Math.max(96, 72) * 0.04);
+
+  const drawn: DrawnSizePx = { width: 600, height: 450 };
+  const corner = { x: 812, y: 640 };
+  const px = mmToPx(corner, view, drawn);
+  const back = pxToMm(px, view, drawn);
+  assert.ok(Math.abs(back.x - corner.x) < 1e-9, `x came back as ${back.x}`);
+  assert.ok(Math.abs(back.y - corner.y) < 1e-9, `y came back as ${back.y}`);
 });

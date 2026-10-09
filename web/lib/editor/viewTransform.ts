@@ -31,6 +31,38 @@ export interface Point2D {
   y: number;
 }
 
+/**
+ * The rectangle a measurement is drawn in: its bounding box plus a margin.
+ *
+ * Pure and exported because it decides where every dot lands and where every
+ * pointer is converted back to — the two must be the same rectangle, or the dots
+ * and the hit test disagree. It was inline in the canvas, where nothing could
+ * test it.
+ */
+export function viewFor(bbox: [number, number, number, number] | null): ViewBoxMm {
+  if (!bbox) {
+    // Nothing measured yet: a 100 mm box with the same padding, so the first
+    // render draws somewhere sane instead of dividing by zero.
+    const fallback = 100;
+    const pad = fallback * 0.04;
+    return {
+      minX: -pad,
+      minY: -pad,
+      w: fallback + pad * 2,
+      h: fallback + pad * 2,
+    };
+  }
+  const [minX, minY, w, h] = bbox;
+  // Padding in millimetres, so the margin looks the same at any zoom.
+  const pad = Math.max(w, h) * 0.04 || 5;
+  return {
+    minX: minX - pad,
+    minY: minY - pad,
+    w: w + pad * 2,
+    h: h + pad * 2,
+  };
+}
+
 /** How the viewBox sits inside the element that draws it. */
 export interface Letterbox {
   /** Millimetres per pixel; one factor for both axes. */

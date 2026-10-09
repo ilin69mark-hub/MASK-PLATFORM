@@ -15,6 +15,7 @@ import {
   type Point2D,
   pxRadiusToMm,
   pxToMm,
+  viewFor,
 } from "@/lib/editor/viewTransform";
 import {
   beginDrag,
@@ -218,21 +219,28 @@ export function StudioCanvas({
   // component ended up with an error it could not display.
   const ready = measurement.status === "ready" ? measurement.result : undefined;
 
-  const view = useMemo(() => {
-    // The first two numbers are where the geometry starts, not decoration. They
-    // used to be discarded — the measurement reported `[0, 0, w, h]` whatever the
-    // input — so the view was built around the origin and any geometry not at the
-    // origin was drawn off the visible area.
-    const [minX, minY, w, h] = ready?.bbox ?? [0, 0, 100, 100];
-    // Padding in millimetres, so the margin looks the same at any zoom.
-    const pad = Math.max(w, h) * 0.04 || 5;
-    return {
-      minX: minX - pad,
-      minY: minY - pad,
-      w: w + pad * 2,
-      h: h + pad * 2,
-    };
-  }, [ready]);
+  // The bounding box of the last measurement that produced one, kept across the
+  // gap while a new one is on its way.
+  //
+  // It used to fall back to a placeholder whenever the measurement was not
+  // `ready` — and every drag makes it not ready, because a committed edit
+  // changes the geometry and the re-measurement is debounced. So the view
+  // collapsed to a 100 mm box in the middle of the drag: the dots jumped
+  // somewhere else on screen and every following pointer position was converted
+  // through the wrong rectangle. The first edit landed, then the coordinate
+  // mapping itself went wrong, which is indistinguishable from a dead tool.
+  //
+  // A ref rather than state on purpose: this is a cache of the last known value,
+  // not something that schedules a render.
+  const lastBbox = useRef<[number, number, number, number] | null>(null);
+  if (ready?.bbox) lastBbox.current = ready.bbox;
+  const bbox = ready?.bbox ?? lastBbox.current;
+
+  // The first two numbers are where the geometry starts, not decoration. They
+  // used to be discarded — the measurement reported `[0, 0, w, h]` whatever the
+  // input — so the view was built around the origin and any geometry not at the
+  // origin was drawn off the visible area.
+  const view = useMemo(() => viewFor(bbox), [bbox]);
 
   // The Node tool: off until toggled (hotkey A). While on, vertices are
   // drawn and draggable, and each committed drag calls `onEdit`. Defined
