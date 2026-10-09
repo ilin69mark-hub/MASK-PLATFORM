@@ -1,6 +1,18 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Dev and build get their own directory.
+  //
+  // They shared `.next`, which meant any `next build` — and `make check` runs
+  // one — overwrote the manifest of a running dev server. Every request then
+  // failed with `Cannot find module './NNN.js'`: the server bundle named a
+  // chunk that the build had just deleted. Clearing the directory bought one
+  // page load before the next check broke it again, so it was fixed twice and
+  // returned both times.
+  //
+  // Two writers in one directory is a conflict, not a cache problem, and the
+  // answer is two directories rather than more clearing.
+  distDir: process.env.NODE_ENV === "development" ? ".next-dev" : ".next",
   // The wasm artifact is produced by `make wasm-dist` and served as a static
   // file. Nothing about it should be bundled or rewritten: the kernel is a
   // separate artifact with its own hash, and rewriting it would break the

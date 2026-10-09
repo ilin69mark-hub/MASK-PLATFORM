@@ -72,6 +72,7 @@ engine/wasm/pkg-node/
 
 # ── Web build output ────────────────────────────────────────────────
 web/.next/
+web/.next-dev/
 web/node_modules/
 web/next-env.d.ts
 web/public/pkg/
